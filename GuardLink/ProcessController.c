@@ -1,21 +1,27 @@
 ﻿#include <ntddk.h>
-#include <wdm.h>
+#include <ntifs.h>
 #include <ntimage.h>
 #include <ntstrsafe.h>
 #include "shared_defs.h"
-#include <ntifs.h>
 
 // ==================== CONFIGURAÇÃO ====================
 
 #define DEVICE_NAME_SEED 0x4D2F8A3C
 #define DOS_NAME_SEED 0x7B9E1D5A
-#define ENCRYPTION_KEY_SIZE 32
-#define MAX_COMMANDS 16
 
-// Tags ofuscados (parecem do sistema)
+// Tags
 #define TAG_POOL 'looP'  // Pool
 #define TAG_FILE 'eliF'  // File
 #define TAG_NTFS 'stfN'  // Ntfs
+
+// Process Access Rights
+#define PROCESS_VM_READ 0x0010
+#define PROCESS_VM_WRITE 0x0020
+#define PROCESS_VM_OPERATION 0x0008
+#define PROCESS_QUERY_INFORMATION 0x0400
+#define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
+#define PROCESS_SUSPEND_RESUME 0x0800
+#define PROCESS_TERMINATE 0x0001
 
 #ifdef _DEBUG
 #define DbgLog(fmt, ...) DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[Drv] " fmt, __VA_ARGS__)
@@ -24,10 +30,6 @@
 #endif
 
 // ==================== ESTRUTURAS ====================
-
-typedef struct _KAPC_STATE {
-    UCHAR Reserved[64];
-} KAPC_STATE, * PKAPC_STATE;
 
 typedef struct _MY_LDR_DATA_TABLE_ENTRY {
     LIST_ENTRY InLoadOrderLinks;
@@ -89,77 +91,9 @@ typedef struct _MODULE_ENTRY {
 // ==================== IMPORTS ====================
 
 extern NTKERNELAPI NTSTATUS PsLookupProcessByProcessId(IN HANDLE ProcessId, OUT PEPROCESS* Process);
-extern NTKERNELAPI VOID KeStackAttachProcess(IN PEPROCESS Process, OUT PRKAPC_STATE ApcState);
-extern NTKERNELAPI VOID KeUnstackDetachProcess(IN PRKAPC_STATE ApcState);
 extern NTKERNELAPI PPEB PsGetProcessPeb(IN PEPROCESS Process);
 extern NTKERNELAPI PCHAR PsGetProcessImageFileName(IN PEPROCESS Process);
-
-// ObRegisterCallbacks
-typedef enum _OB_PREOP_CALLBACK_STATUS {
-    OB_PREOP_SUCCESS
-} OB_PREOP_CALLBACK_STATUS;
-
-typedef struct _OB_PRE_OPERATION_INFORMATION {
-    ULONG Operation;
-    union {
-        ULONG Flags;
-        struct {
-            ULONG KernelHandle : 1;
-            ULONG Reserved : 31;
-        };
-    };
-    PVOID Object;
-    POBJECT_TYPE ObjectType;
-    PVOID CallContext;
-    POB_PRE_OPERATION_PARAMETERS Parameters;
-} OB_PRE_OPERATION_INFORMATION, * POB_PRE_OPERATION_INFORMATION;
-
-typedef struct _OB_PRE_CREATE_HANDLE_INFORMATION {
-    ACCESS_MASK DesiredAccess;
-    ACCESS_MASK OriginalDesiredAccess;
-} OB_PRE_CREATE_HANDLE_INFORMATION, * POB_PRE_CREATE_HANDLE_INFORMATION;
-
-typedef struct _OB_PRE_DUPLICATE_HANDLE_INFORMATION {
-    ACCESS_MASK DesiredAccess;
-    ACCESS_MASK OriginalDesiredAccess;
-    PVOID SourceProcess;
-    PVOID TargetProcess;
-} OB_PRE_DUPLICATE_HANDLE_INFORMATION, * POB_PRE_DUPLICATE_HANDLE_INFORMATION;
-
-typedef union _OB_PRE_OPERATION_PARAMETERS {
-    OB_PRE_CREATE_HANDLE_INFORMATION CreateHandleInformation;
-    OB_PRE_DUPLICATE_HANDLE_INFORMATION DuplicateHandleInformation;
-} OB_PRE_OPERATION_PARAMETERS, * POB_PRE_OPERATION_PARAMETERS;
-
-typedef OB_PREOP_CALLBACK_STATUS(*POB_PRE_OPERATION_CALLBACK)(
-    PVOID RegistrationContext,
-    POB_PRE_OPERATION_INFORMATION OperationInformation);
-
-typedef struct _OB_OPERATION_REGISTRATION {
-    POBJECT_TYPE* ObjectType;
-    ULONG Operations;
-    POB_PRE_OPERATION_CALLBACK PreOperation;
-    PVOID PostOperation;
-} OB_OPERATION_REGISTRATION, * POB_OPERATION_REGISTRATION;
-
-typedef struct _OB_CALLBACK_REGISTRATION {
-    USHORT Version;
-    USHORT OperationRegistrationCount;
-    UNICODE_STRING Altitude;
-    PVOID RegistrationContext;
-    OB_OPERATION_REGISTRATION* OperationRegistration;
-} OB_CALLBACK_REGISTRATION, * POB_CALLBACK_REGISTRATION;
-
-extern NTKERNELAPI NTSTATUS ObRegisterCallbacks(
-    IN POB_CALLBACK_REGISTRATION CallbackRegistration,
-    OUT PVOID* RegistrationHandle);
-
-extern NTKERNELAPI VOID ObUnRegisterCallbacks(IN PVOID RegistrationHandle);
-
 extern POBJECT_TYPE* PsProcessType;
-
-#define OB_OPERATION_HANDLE_CREATE 0x00000001
-#define OB_OPERATION_HANDLE_DUPLICATE 0x00000002
 
 // ==================== CONTEXTO GLOBAL ====================
 
@@ -176,20 +110,6 @@ typedef struct _DRIVER_CONTEXT {
 } DRIVER_CONTEXT, * PDRIVER_CONTEXT;
 
 PDRIVER_CONTEXT g_Context = NULL;
-
-// Índices de comandos
-enum {
-    CMD_SET_TARGET = 0,
-    CMD_ENABLE_MONITOR = 1,
-    CMD_READ_MEMORY = 2,
-    CMD_WRITE_MEMORY = 3,
-    CMD_GET_MODULE = 4,
-    CMD_INSTALL_HOOK = 5,
-    CMD_REMOVE_HOOK = 6,
-    CMD_HIDE_PROCESS = 7,
-    CMD_PROTECT_PROCESS = 8,
-    CMD_ENUM_MODULES = 9
-};
 
 // ==================== CRIPTOGRAFIA ====================
 
@@ -285,16 +205,13 @@ NTSTATUS InitializeObfuscatedIoctl() {
     g_Context->IoctlMap.Timestamp = (ULONG)(time.QuadPart & 0xFFFFFFFF);
     g_Context->IoctlMap.RandomSeed = (ULONG)((time.QuadPart >> 32) & 0xFFFFFFFF);
 
-    // Gera tabela de comandos
     ULONG seed = g_Context->IoctlMap.RandomSeed;
     for (int i = 0; i < MAX_COMMANDS; i++) {
         seed = (seed * 1103515245 + 12345);
         g_Context->IoctlMap.CommandTable[i] = seed;
     }
 
-    // Gera chave XOR
     GenerateEncryptionKey(g_Context->IoctlMap.XorKey, ENCRYPTION_KEY_SIZE);
-
     g_Context->LastUpdate = time;
 
     DbgLog("IOCTL Map initialized: Timestamp=%lu, Seed=%08X\n",
@@ -307,7 +224,6 @@ BOOLEAN ValidateCommandHash(ULONG commandHash, PULONG commandIndex) {
     KIRQL oldIrql;
     KeAcquireSpinLock(&g_Context->IoctlMapLock, &oldIrql);
 
-    // Rotação de códigos a cada 5 minutos
     LARGE_INTEGER currentTime;
     KeQuerySystemTime(&currentTime);
     LONGLONG timeDiff = (currentTime.QuadPart - g_Context->LastUpdate.QuadPart) / 10000000;
@@ -479,8 +395,6 @@ NTSTATUS GetModuleBase(
             }
 
             listEntry = listEntry->Flink;
-
-            // Proteção contra loop infinito
             if (listEntry == listHead) break;
         }
     }
@@ -507,16 +421,13 @@ NTSTATUS InstallInlineHook(
     PPROTECTED_PROCESS protectedProc = FindProtectedProcess(ProcessId);
     if (!protectedProc) return STATUS_NOT_FOUND;
 
-    // Lê bytes originais
     UCHAR originalBytes[16];
     NTSTATUS status = ReadProcessMemory(ProcessId, TargetAddress, originalBytes, HookSize);
     if (!NT_SUCCESS(status)) return status;
 
-    // Instala hook
     status = WriteProcessMemory(ProcessId, TargetAddress, HookCode, HookSize);
     if (!NT_SUCCESS(status)) return status;
 
-    // Registra hook
     PFUNCTION_HOOK hook = (PFUNCTION_HOOK)ExAllocatePoolWithTag(
         NonPagedPool, sizeof(FUNCTION_HOOK), TAG_POOL);
 
@@ -564,7 +475,6 @@ NTSTATUS RemoveHook(_In_ HANDLE ProcessId, _In_ PVOID TargetAddress) {
 
     if (!hookToRemove) return STATUS_NOT_FOUND;
 
-    // Restaura bytes originais
     NTSTATUS status = WriteProcessMemory(
         ProcessId, hookToRemove->TargetAddress,
         hookToRemove->OriginalBytes, hookToRemove->HookSize);
@@ -587,24 +497,20 @@ NTSTATUS HideProcessFromList(_In_ HANDLE ProcessId) {
     PEPROCESS process = protectedProc->Process;
     if (!process) return STATUS_INVALID_PARAMETER;
 
-    // Offset para ActiveProcessLinks (Windows 10/11: 0x448)
     ULONG_PTR activeProcessLinksOffset = 0x448;
 
     __try {
         PLIST_ENTRY activeLinks = (PLIST_ENTRY)((PUCHAR)process + activeProcessLinksOffset);
 
-        // Salva ponteiros originais
         protectedProc->OriginalFlink = activeLinks->Flink;
         protectedProc->OriginalBlink = activeLinks->Blink;
 
-        // Remove da lista (DKOM)
         PLIST_ENTRY prevEntry = activeLinks->Blink;
         PLIST_ENTRY nextEntry = activeLinks->Flink;
 
         prevEntry->Flink = nextEntry;
         nextEntry->Blink = prevEntry;
 
-        // Aponta para si mesmo (evita crash)
         activeLinks->Flink = activeLinks;
         activeLinks->Blink = activeLinks;
 
@@ -631,7 +537,6 @@ NTSTATUS UnhideProcess(_In_ HANDLE ProcessId) {
     __try {
         PLIST_ENTRY activeLinks = (PLIST_ENTRY)((PUCHAR)process + activeProcessLinksOffset);
 
-        // Restaura ponteiros originais
         activeLinks->Flink = protectedProc->OriginalFlink;
         activeLinks->Blink = protectedProc->OriginalBlink;
 
@@ -664,18 +569,15 @@ OB_PREOP_CALLBACK_STATUS PreOperationCallback(
     PEPROCESS targetProcess = (PEPROCESS)OperationInformation->Object;
     HANDLE targetPid = PsGetProcessId(targetProcess);
 
-    // Verifica se é processo protegido
     PPROTECTED_PROCESS protectedProc = FindProtectedProcess(targetPid);
     if (!protectedProc) {
         return OB_PREOP_SUCCESS;
     }
 
-    // Remove permissões perigosas
     if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
         POB_PRE_CREATE_HANDLE_INFORMATION createInfo =
             &OperationInformation->Parameters->CreateHandleInformation;
 
-        // Remove direitos de leitura/escrita de memória
         createInfo->DesiredAccess &= ~PROCESS_VM_READ;
         createInfo->DesiredAccess &= ~PROCESS_VM_WRITE;
         createInfo->DesiredAccess &= ~PROCESS_VM_OPERATION;
@@ -708,7 +610,7 @@ NTSTATUS RegisterProcessProtection() {
     opReg.PostOperation = NULL;
 
     UNICODE_STRING altitude;
-    RtlInitUnicodeString(&altitude, L"385200"); // Altitude aleatória
+    RtlInitUnicodeString(&altitude, L"385200");
 
     callbackReg.Version = OB_FLT_REGISTRATION_VERSION;
     callbackReg.OperationRegistrationCount = 1;
@@ -738,6 +640,19 @@ VOID UnregisterProcessProtection() {
 
 // ==================== CALLBACKS ====================
 
+// Função helper para converter multibyte para widechar
+NTSTATUS AnsiToUnicode(PCHAR AnsiString, PWCHAR UnicodeBuffer, ULONG BufferSize) {
+    ANSI_STRING ansi;
+    UNICODE_STRING unicode;
+
+    RtlInitAnsiString(&ansi, AnsiString);
+    unicode.Buffer = UnicodeBuffer;
+    unicode.MaximumLength = (USHORT)BufferSize;
+    unicode.Length = 0;
+
+    return RtlAnsiStringToUnicodeString(&unicode, &ansi, FALSE);
+}
+
 VOID ProcessNotifyCallback(
     _In_ HANDLE ParentId,
     _In_ HANDLE ProcessId,
@@ -755,37 +670,39 @@ VOID ProcessNotifyCallback(
         PCHAR procName = PsGetProcessImageFileName(process);
         if (procName) {
             WCHAR wProcName[260];
-            size_t converted;
-            mbstowcs_s(&converted, wProcName, 260, procName, _TRUNCATE);
 
-            ULONG hash = CalculateHash(wProcName);
+            status = AnsiToUnicode(procName, wProcName, sizeof(wProcName));
 
-            if (hash == g_Context->TargetProcessHash) {
-                PPROTECTED_PROCESS protectedProc =
-                    (PPROTECTED_PROCESS)ExAllocatePoolWithTag(
-                        NonPagedPool, sizeof(PROTECTED_PROCESS), TAG_POOL);
+            if (NT_SUCCESS(status)) {
+                ULONG hash = CalculateHash(wProcName);
 
-                if (protectedProc) {
-                    RtlZeroMemory(protectedProc, sizeof(PROTECTED_PROCESS));
-                    protectedProc->ProcessId = ProcessId;
-                    protectedProc->Process = process;
-                    protectedProc->Flags = 0x01;
-                    protectedProc->IsHidden = FALSE;
-                    protectedProc->ObHandle = NULL;
+                if (hash == g_Context->TargetProcessHash) {
+                    PPROTECTED_PROCESS protectedProc =
+                        (PPROTECTED_PROCESS)ExAllocatePoolWithTag(
+                            NonPagedPool, sizeof(PROTECTED_PROCESS), TAG_POOL);
 
-                    RtlCopyMemory(protectedProc->ProcessNameHash, &hash, sizeof(ULONG));
+                    if (protectedProc) {
+                        RtlZeroMemory(protectedProc, sizeof(PROTECTED_PROCESS));
+                        protectedProc->ProcessId = ProcessId;
+                        protectedProc->Process = process;
+                        protectedProc->Flags = 0x01;
+                        protectedProc->IsHidden = FALSE;
+                        protectedProc->ObHandle = NULL;
 
-                    InitializeListHead(&protectedProc->HookList);
-                    InitializeListHead(&protectedProc->ModuleList);
+                        RtlCopyMemory(protectedProc->ProcessNameHash, &hash, sizeof(ULONG));
 
-                    KIRQL oldIrql;
-                    KeAcquireSpinLock(&g_Context->ProcessListLock, &oldIrql);
-                    InsertTailList(&g_Context->ProcessList, &protectedProc->ListEntry);
-                    KeReleaseSpinLock(&g_Context->ProcessListLock, oldIrql);
+                        InitializeListHead(&protectedProc->HookList);
+                        InitializeListHead(&protectedProc->ModuleList);
 
-                    DbgLog("Target process detected: PID=%p, Name=%s\n", ProcessId, procName);
+                        KIRQL oldIrql;
+                        KeAcquireSpinLock(&g_Context->ProcessListLock, &oldIrql);
+                        InsertTailList(&g_Context->ProcessList, &protectedProc->ListEntry);
+                        KeReleaseSpinLock(&g_Context->ProcessListLock, oldIrql);
 
-                    return;
+                        DbgLog("Target process detected: PID=%p, Name=%s\n", ProcessId, procName);
+
+                        return;
+                    }
                 }
             }
         }
@@ -793,20 +710,17 @@ VOID ProcessNotifyCallback(
         ObDereferenceObject(process);
     }
     else {
-        // Processo terminando - remover da lista
         PPROTECTED_PROCESS protectedProc = FindProtectedProcess(ProcessId);
         if (protectedProc) {
             KIRQL oldIrql;
             KeAcquireSpinLock(&g_Context->ProcessListLock, &oldIrql);
 
-            // Remove hooks
             while (!IsListEmpty(&protectedProc->HookList)) {
                 PLIST_ENTRY entry = RemoveHeadList(&protectedProc->HookList);
                 PFUNCTION_HOOK hook = CONTAINING_RECORD(entry, FUNCTION_HOOK, ListEntry);
                 ExFreePoolWithTag(hook, TAG_POOL);
             }
 
-            // Remove módulos
             while (!IsListEmpty(&protectedProc->ModuleList)) {
                 PLIST_ENTRY entry = RemoveHeadList(&protectedProc->ModuleList);
                 PMODULE_ENTRY module = CONTAINING_RECORD(entry, MODULE_ENTRY, ListEntry);
@@ -832,7 +746,6 @@ VOID ThreadNotifyCallback(
     UNREFERENCED_PARAMETER(ProcessId);
     UNREFERENCED_PARAMETER(ThreadId);
     UNREFERENCED_PARAMETER(Create);
-    // Implementar se necessário
 }
 
 VOID ImageLoadCallback(
@@ -840,15 +753,13 @@ VOID ImageLoadCallback(
     _In_ HANDLE ProcessId,
     _In_ PIMAGE_INFO ImageInfo)
 {
-    UNREFERENCED_PARAMETER(FullImageName);
+    UNREFERENCED_PARAMETER(ImageInfo);
 
-    // Detecta carregamento de anti-cheat
     if (g_Context->MonitoringEnabled && FullImageName && FullImageName->Buffer) {
         WCHAR* fileName = wcsrchr(FullImageName->Buffer, L'\\');
         if (fileName) {
-            fileName++; // Skip backslash
+            fileName++;
 
-            // Lista de DLLs de anti-cheat conhecidas
             const WCHAR* antiCheatDlls[] = {
                 L"BEService.dll",
                 L"BEDaisy.sys",
@@ -860,14 +771,11 @@ VOID ImageLoadCallback(
             for (int i = 0; i < sizeof(antiCheatDlls) / sizeof(WCHAR*); i++) {
                 if (_wcsicmp(fileName, antiCheatDlls[i]) == 0) {
                     DbgLog("Anti-cheat detected: %ws in PID=%p\n", fileName, ProcessId);
-                    // Aqui poderia implementar contramedidas
                     break;
                 }
             }
         }
     }
-
-    UNREFERENCED_PARAMETER(ImageInfo);
 }
 
 // ==================== HANDSHAKE ====================
@@ -887,12 +795,10 @@ NTSTATUS HandleHandshake(
     PHANDSHAKE_REQUEST request = (PHANDSHAKE_REQUEST)InputBuffer;
     PHANDSHAKE_RESPONSE response = (PHANDSHAKE_RESPONSE)OutputBuffer;
 
-    // Valida versão
     if (request->ClientVersion != 1) {
         return STATUS_REVISION_MISMATCH;
     }
 
-    // Valida timestamp (máximo 30 segundos)
     LARGE_INTEGER currentTime;
     KeQuerySystemTime(&currentTime);
     ULONG currentTimestamp = (ULONG)(currentTime.QuadPart / 10000000);
@@ -904,7 +810,6 @@ NTSTATUS HandleHandshake(
         return STATUS_TIMEOUT;
     }
 
-    // Envia mapa para cliente
     KIRQL oldIrql;
     KeAcquireSpinLock(&g_Context->IoctlMapLock, &oldIrql);
 
@@ -912,7 +817,6 @@ NTSTATUS HandleHandshake(
     response->ServerTimestamp = g_Context->IoctlMap.Timestamp;
     RtlCopyMemory(&response->IoctlMap, &g_Context->IoctlMap, sizeof(DYNAMIC_IOCTL_MAP));
 
-    // Gera nonce do servidor
     ULONG seed = g_Context->IoctlMap.RandomSeed ^ currentTimestamp;
     for (int i = 0; i < 32; i++) {
         seed = (seed * 1103515245 + 12345);
@@ -930,7 +834,7 @@ NTSTATUS HandleHandshake(
 
 // ==================== DEVICE CONTROL ====================
 
-NTSTATUS HandleObfuscatedCommand(
+NTSTATUS HandleCommand(
     _In_ POBFUSCATED_REQUEST request,
     _In_ ULONG inputLength,
     _Out_ PVOID outputBuffer,
@@ -940,12 +844,10 @@ NTSTATUS HandleObfuscatedCommand(
     NTSTATUS status = STATUS_SUCCESS;
     *bytesReturned = 0;
 
-    // Valida tamanho mínimo
     if (inputLength < sizeof(OBFUSCATED_REQUEST)) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Valida magic number (time-based)
     LARGE_INTEGER time;
     KeQuerySystemTime(&time);
     ULONG expectedMagic = (ULONG)(time.QuadPart / 10000000 / 60);
@@ -956,19 +858,16 @@ NTSTATUS HandleObfuscatedCommand(
         return STATUS_ACCESS_DENIED;
     }
 
-    // Valida comando
     ULONG commandIndex;
     if (!ValidateCommandHash(request->CommandHash, &commandIndex)) {
         DbgLog("Invalid command hash: %08X\n", request->CommandHash);
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Verifica tamanho do payload
     if (request->PayloadSize > 4096) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Decripta payload
     UCHAR decryptedPayload[4096];
     KIRQL oldIrql;
     KeAcquireSpinLock(&g_Context->IoctlMapLock, &oldIrql);
@@ -977,14 +876,12 @@ NTSTATUS HandleObfuscatedCommand(
     RtlCopyMemory(decryptedPayload, request->EncryptedPayload, request->PayloadSize);
     KeReleaseSpinLock(&g_Context->IoctlMapLock, oldIrql);
 
-    // Valida checksum
     ULONG calculatedChecksum = CalculateChecksum(decryptedPayload, request->PayloadSize);
     if (calculatedChecksum != request->Checksum) {
         DbgLog("Checksum mismatch: %08X vs %08X\n", calculatedChecksum, request->Checksum);
         return STATUS_DATA_ERROR;
     }
 
-    // Processa comando
     switch (commandIndex) {
     case CMD_SET_TARGET: {
         if (request->PayloadSize < sizeof(WCHAR) * 2) {
@@ -1102,7 +999,6 @@ NTSTATUS HandleObfuscatedCommand(
             break;
         }
         PPROCESS_REQUEST procReq = (PPROCESS_REQUEST)decryptedPayload;
-        // ObCallbacks já protegem todos os processos na lista
         DbgLog("Process protection active for: %ws\n", procReq->ProcessName);
         break;
     }
@@ -1129,7 +1025,6 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
     ULONG outputLength = irpStack->Parameters.DeviceIoControl.OutputBufferLength;
     ULONG ioControlCode = irpStack->Parameters.DeviceIoControl.IoControlCode;
 
-    // IOCTL especial para handshake (não ofuscado)
     ULONG handshakeIoctl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS);
 
     if (ioControlCode == handshakeIoctl) {
@@ -1137,8 +1032,7 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
             outputLength, &bytesReturned);
     }
     else {
-        // Comandos ofuscados
-        status = HandleObfuscatedCommand((POBFUSCATED_REQUEST)inputBuffer, inputLength,
+        status = HandleCommand((POBFUSCATED_REQUEST)inputBuffer, inputLength,
             outputBuffer, outputLength, &bytesReturned);
     }
 
@@ -1178,13 +1072,11 @@ VOID DriverUnload(_In_ PDRIVER_OBJECT DriverObject)
 
     DbgLog("Driver unloading...\n");
 
-    // Remove callbacks
     UnregisterProcessProtection();
     PsSetLoadImageNotifyRoutine(ImageLoadCallback);
     PsRemoveCreateThreadNotifyRoutine(ThreadNotifyCallback);
     PsSetCreateProcessNotifyRoutine(ProcessNotifyCallback, TRUE);
 
-    // Limpa processos protegidos
     KIRQL oldIrql;
     KeAcquireSpinLock(&g_Context->ProcessListLock, &oldIrql);
 
@@ -1192,12 +1084,10 @@ VOID DriverUnload(_In_ PDRIVER_OBJECT DriverObject)
         PLIST_ENTRY entry = RemoveHeadList(&g_Context->ProcessList);
         PPROTECTED_PROCESS proc = CONTAINING_RECORD(entry, PROTECTED_PROCESS, ListEntry);
 
-        // Restaura processo se escondido
         if (proc->IsHidden) {
             UnhideProcess(proc->ProcessId);
         }
 
-        // Remove hooks
         while (!IsListEmpty(&proc->HookList)) {
             PLIST_ENTRY hookEntry = RemoveHeadList(&proc->HookList);
             PFUNCTION_HOOK hook = CONTAINING_RECORD(hookEntry, FUNCTION_HOOK, ListEntry);
@@ -1210,7 +1100,6 @@ VOID DriverUnload(_In_ PDRIVER_OBJECT DriverObject)
             ExFreePoolWithTag(hook, TAG_POOL);
         }
 
-        // Remove módulos
         while (!IsListEmpty(&proc->ModuleList)) {
             PLIST_ENTRY modEntry = RemoveHeadList(&proc->ModuleList);
             PMODULE_ENTRY module = CONTAINING_RECORD(modEntry, MODULE_ENTRY, ListEntry);
@@ -1223,7 +1112,6 @@ VOID DriverUnload(_In_ PDRIVER_OBJECT DriverObject)
 
     KeReleaseSpinLock(&g_Context->ProcessListLock, oldIrql);
 
-    // Remove dispositivo
     if (g_Context->DeviceObject) {
         UNICODE_STRING dosName;
         WCHAR dosNameBuffer[256];
@@ -1238,7 +1126,6 @@ VOID DriverUnload(_In_ PDRIVER_OBJECT DriverObject)
         IoDeleteDevice(g_Context->DeviceObject);
     }
 
-    // Limpa contexto
     ExFreePoolWithTag(g_Context, TAG_POOL);
     g_Context = NULL;
 
@@ -1256,7 +1143,6 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
 
     DbgLog("Driver loading...\n");
 
-    // Aloca contexto
     g_Context = (PDRIVER_CONTEXT)ExAllocatePoolWithTag(
         NonPagedPool, sizeof(DRIVER_CONTEXT), TAG_POOL);
 
@@ -1266,14 +1152,12 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
     InitializeListHead(&g_Context->ProcessList);
     KeInitializeSpinLock(&g_Context->ProcessListLock);
 
-    // Inicializa IOCTL ofuscado
     status = InitializeObfuscatedIoctl();
     if (!NT_SUCCESS(status)) {
         ExFreePoolWithTag(g_Context, TAG_POOL);
         return status;
     }
 
-    // Cria dispositivo
     GenerateRandomDeviceName(deviceNameBuffer, sizeof(deviceNameBuffer), DEVICE_NAME_SEED);
     RtlInitUnicodeString(&deviceName, deviceNameBuffer);
 
@@ -1285,7 +1169,6 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
         return status;
     }
 
-    // Cria symbolic link
     RtlStringCbCopyW(dosNameBuffer, sizeof(dosNameBuffer), L"\\DosDevices\\");
     RtlStringCbCatW(dosNameBuffer, sizeof(dosNameBuffer), deviceNameBuffer + 9);
     RtlInitUnicodeString(&dosDeviceName, dosNameBuffer);
@@ -1297,13 +1180,11 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
         return status;
     }
 
-    // Registra handlers
     DriverObject->MajorFunction[IRP_MJ_CREATE] = DeviceCreate;
     DriverObject->MajorFunction[IRP_MJ_CLOSE] = DeviceClose;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DeviceControl;
     DriverObject->DriverUnload = DriverUnload;
 
-    // Registra callbacks
     status = PsSetCreateProcessNotifyRoutine(ProcessNotifyCallback, FALSE);
     if (!NT_SUCCESS(status)) goto Cleanup;
 
@@ -1320,11 +1201,9 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
         goto Cleanup;
     }
 
-    // Registra proteção de processo
     status = RegisterProcessProtection();
     if (!NT_SUCCESS(status)) {
         DbgLog("Warning: Failed to register process protection\n");
-        // Não falha por causa disso
     }
 
     DbgLog("Driver loaded successfully\n");
