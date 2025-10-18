@@ -1,0 +1,55 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36603.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "GuardLink Driver", "GuardLink\GuardLink.vcxproj", "{3CE85194-A3A9-8F84-062F-19089BD3DD54}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "UserMode_Loader", "UserMode_Loader\UserMode_Loader.vcxproj", "{6F4CD4CD-C5DF-4350-92D0-560F7348E859}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "UserModeControl", "UserModeControl\UserModeControl.vcxproj", "{C65831DC-5500-495A-9C78-71C86BDFB29E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|ARM64 = Debug|ARM64
+		Debug|x64 = Debug|x64
+		Release|ARM64 = Release|ARM64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Debug|ARM64.Build.0 = Debug|ARM64
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Debug|ARM64.Deploy.0 = Debug|ARM64
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Debug|x64.ActiveCfg = Release|x64
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Debug|x64.Build.0 = Release|x64
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Debug|x64.Deploy.0 = Release|x64
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Release|ARM64.ActiveCfg = Release|ARM64
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Release|ARM64.Build.0 = Release|ARM64
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Release|ARM64.Deploy.0 = Release|ARM64
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Release|x64.ActiveCfg = Release|x64
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Release|x64.Build.0 = Release|x64
+		{3CE85194-A3A9-8F84-062F-19089BD3DD54}.Release|x64.Deploy.0 = Release|x64
+		{6F4CD4CD-C5DF-4350-92D0-560F7348E859}.Debug|ARM64.ActiveCfg = Debug|x64
+		{6F4CD4CD-C5DF-4350-92D0-560F7348E859}.Debug|ARM64.Build.0 = Debug|x64
+		{6F4CD4CD-C5DF-4350-92D0-560F7348E859}.Debug|x64.ActiveCfg = Debug|x64
+		{6F4CD4CD-C5DF-4350-92D0-560F7348E859}.Debug|x64.Build.0 = Debug|x64
+		{6F4CD4CD-C5DF-4350-92D0-560F7348E859}.Release|ARM64.ActiveCfg = Release|x64
+		{6F4CD4CD-C5DF-4350-92D0-560F7348E859}.Release|ARM64.Build.0 = Release|x64
+		{6F4CD4CD-C5DF-4350-92D0-560F7348E859}.Release|x64.ActiveCfg = Release|x64
+		{6F4CD4CD-C5DF-4350-92D0-560F7348E859}.Release|x64.Build.0 = Release|x64
+		{C65831DC-5500-495A-9C78-71C86BDFB29E}.Debug|ARM64.ActiveCfg = Debug|x64
+		{C65831DC-5500-495A-9C78-71C86BDFB29E}.Debug|ARM64.Build.0 = Debug|x64
+		{C65831DC-5500-495A-9C78-71C86BDFB29E}.Debug|x64.ActiveCfg = Debug|x64
+		{C65831DC-5500-495A-9C78-71C86BDFB29E}.Debug|x64.Build.0 = Debug|x64
+		{C65831DC-5500-495A-9C78-71C86BDFB29E}.Release|ARM64.ActiveCfg = Release|x64
+		{C65831DC-5500-495A-9C78-71C86BDFB29E}.Release|ARM64.Build.0 = Release|x64
+		{C65831DC-5500-495A-9C78-71C86BDFB29E}.Release|x64.ActiveCfg = Release|x64
+		{C65831DC-5500-495A-9C78-71C86BDFB29E}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {1CD2C354-D2EE-4712-A0ED-9B8B89D048C2}
+	EndGlobalSection
+EndGlobal

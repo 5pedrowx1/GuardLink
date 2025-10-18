@@ -1,0 +1,56 @@
+;
+; GuardLink.inf
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+CatalogFile = GuardLink.cat
+DriverVer   = 10/16/2025,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13 ; %SystemRoot%\System32\drivers
+
+[SourceDisksNames]
+1 = %DiskName%,,, ; Disco virtual nº1
+
+[SourceDisksFiles]
+GuardLinkDriver.sys = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$.10.0...16299
+
+[Standard.NT$ARCH$.10.0...16299]
+%GuardLink.DeviceDesc% = GuardLink_Device, Root\GuardLink
+
+[GuardLink_Device.NT]
+CopyFiles = File_Copy
+
+[File_Copy]
+GuardLinkDriver.sys
+
+[GuardLink_Device.NT.Services]
+AddService = GuardLink,%SPSVCINST_ASSOCSERVICE%, GuardLink_Service_Inst
+
+[GuardLink_Service_Inst]
+DisplayName    = %GuardLink.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\GuardLinkDriver.sys
+
+[GuardLink_Device.NT.Wdf]
+KmdfService = GuardLink, GuardLink_wdfsect
+
+[GuardLink_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName = "<5pedrowx1 GuardLink>"
+DiskName = "GuardLink Installation Disk"
+GuardLink.DeviceDesc = "GuardLink Device"
+GuardLink.SVCDESC = "GuardLink Service"
