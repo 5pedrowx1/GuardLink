@@ -159,10 +159,33 @@ public:
             wcscpy_s(finalName, deviceName);
         }
         else {
-            // Gera nome usando mesmo seed do driver
-            WCHAR generatedName[256];
-            GenerateRandomDeviceName(generatedName, 256, 0x7B9E1D5A); // DOS_NAME_SEED
-            swprintf_s(finalName, L"\\\\.\\%s", generatedName);
+            // Lê do registry
+            HKEY hKey;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                L"System\\CurrentControlSet\\Services\\GuardLink\\Parameters",
+                0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+
+                WCHAR regValue[256];
+                DWORD size = sizeof(regValue);
+
+                if (RegQueryValueExW(hKey, L"DeviceName", NULL, NULL,
+                    (LPBYTE)regValue, &size) == ERROR_SUCCESS) {
+                    swprintf_s(finalName, L"\\\\.\\%s", regValue);
+                    printf("[+] Device name read from registry: %ws\n", regValue);
+                }
+                else {
+                    printf("[-] Failed to read device name from registry\n");
+                    RegCloseKey(hKey);
+                    return false;
+                }
+
+                RegCloseKey(hKey);
+            }
+            else {
+                printf("[-] Failed to open registry key\n");
+                printf("[!] Make sure driver is loaded\n");
+                return false;
+            }
         }
 
         printf("[*] Connecting to device: %ws\n", finalName);

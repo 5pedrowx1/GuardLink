@@ -1,8 +1,26 @@
 ﻿#include <ntddk.h>
-#include <ntifs.h>
 #include <ntimage.h>
 #include <ntstrsafe.h>
 #include "shared_defs.h"
+
+// Declarações forward necessárias de ntifs.h sem incluir o header completo
+typedef struct _KAPC_STATE {
+    LIST_ENTRY ApcListHead[2];
+    PKPROCESS Process;
+    BOOLEAN KernelApcInProgress;
+    BOOLEAN KernelApcPending;
+    BOOLEAN UserApcPending;
+} KAPC_STATE, * PKAPC_STATE, * PRKAPC_STATE;
+
+// Protótipos de funções do kernel
+NTKERNELAPI VOID KeStackAttachProcess(
+    _In_ PKPROCESS Process,
+    _Out_ PRKAPC_STATE ApcState
+);
+
+NTKERNELAPI VOID KeUnstackDetachProcess(
+    _In_ PRKAPC_STATE ApcState
+);
 
 // ==================== CONFIGURAÇÃO ====================
 
@@ -10,9 +28,9 @@
 #define DOS_NAME_SEED 0x7B9E1D5A
 
 // Tags
-#define TAG_POOL 'looP'  // Pool
-#define TAG_FILE 'eliF'  // File
-#define TAG_NTFS 'stfN'  // Ntfs
+#define TAG_POOL 'looP'
+#define TAG_FILE 'eliF'
+#define TAG_NTFS 'stfN'
 
 // Process Access Rights
 #define PROCESS_VM_READ 0x0010
@@ -93,6 +111,7 @@ typedef struct _MODULE_ENTRY {
 extern NTKERNELAPI NTSTATUS PsLookupProcessByProcessId(IN HANDLE ProcessId, OUT PEPROCESS* Process);
 extern NTKERNELAPI PPEB PsGetProcessPeb(IN PEPROCESS Process);
 extern NTKERNELAPI PCHAR PsGetProcessImageFileName(IN PEPROCESS Process);
+extern NTKERNELAPI HANDLE PsGetProcessId(IN PEPROCESS Process);
 extern POBJECT_TYPE* PsProcessType;
 
 // ==================== CONTEXTO GLOBAL ====================
@@ -266,7 +285,7 @@ NTSTATUS ReadProcessMemory(
     status = PsLookupProcessByProcessId(ProcessId, &process);
     if (!NT_SUCCESS(status)) return status;
 
-    KeStackAttachProcess(process, &apcState);
+    KeStackAttachProcess((PKPROCESS)process, &apcState);
 
     __try {
         ProbeForRead(Address, Size, 1);
@@ -428,8 +447,9 @@ NTSTATUS InstallInlineHook(
     status = WriteProcessMemory(ProcessId, TargetAddress, HookCode, HookSize);
     if (!NT_SUCCESS(status)) return status;
 
-    PFUNCTION_HOOK hook = (PFUNCTION_HOOK)ExAllocatePoolWithTag(
-        NonPagedPool, sizeof(FUNCTION_HOOK), TAG_POOL);
+    // Usando ExAllocatePool2 (Windows 10 2004+)
+    PFUNCTION_HOOK hook = (PFUNCTION_HOOK)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED, sizeof(FUNCTION_HOOK), TAG_POOL);
 
     if (!hook) {
         WriteProcessMemory(ProcessId, TargetAddress, originalBytes, HookSize);
@@ -640,7 +660,6 @@ VOID UnregisterProcessProtection() {
 
 // ==================== CALLBACKS ====================
 
-// Função helper para converter multibyte para widechar
 NTSTATUS AnsiToUnicode(PCHAR AnsiString, PWCHAR UnicodeBuffer, ULONG BufferSize) {
     ANSI_STRING ansi;
     UNICODE_STRING unicode;
@@ -678,8 +697,8 @@ VOID ProcessNotifyCallback(
 
                 if (hash == g_Context->TargetProcessHash) {
                     PPROTECTED_PROCESS protectedProc =
-                        (PPROTECTED_PROCESS)ExAllocatePoolWithTag(
-                            NonPagedPool, sizeof(PROTECTED_PROCESS), TAG_POOL);
+                        (PPROTECTED_PROCESS)ExAllocatePool2(
+                            POOL_FLAG_NON_PAGED, sizeof(PROTECTED_PROCESS), TAG_POOL);
 
                     if (protectedProc) {
                         RtlZeroMemory(protectedProc, sizeof(PROTECTED_PROCESS));
@@ -1143,8 +1162,8 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
 
     DbgLog("Driver loading...\n");
 
-    g_Context = (PDRIVER_CONTEXT)ExAllocatePoolWithTag(
-        NonPagedPool, sizeof(DRIVER_CONTEXT), TAG_POOL);
+    g_Context = (PDRIVER_CONTEXT)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED, sizeof(DRIVER_CONTEXT), TAG_POOL);
 
     if (!g_Context) return STATUS_INSUFFICIENT_RESOURCES;
 
@@ -1178,6 +1197,30 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
         IoDeleteDevice(g_Context->DeviceObject);
         ExFreePoolWithTag(g_Context, TAG_POOL);
         return status;
+    }
+
+    UNICODE_STRING regPath;
+    RtlInitUnicodeString(&regPath, L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\GuardLink\\Parameters");
+
+    OBJECT_ATTRIBUTES objAttr;
+    InitializeObjectAttributes(&objAttr, &regPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    HANDLE hKey;
+    NTSTATUS regStatus = ZwCreateKey(&hKey, KEY_WRITE, &objAttr, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+    if (NT_SUCCESS(regStatus)) {
+        UNICODE_STRING valueName;
+        RtlInitUnicodeString(&valueName, L"DeviceName");
+
+        WCHAR shortName[256];
+        RtlStringCbCopyW(shortName, sizeof(shortName), dosNameBuffer + 12);
+
+        ZwSetValueKey(hKey, &valueName, 0, REG_SZ, shortName, (ULONG)(wcslen(shortName) + 1) * sizeof(WCHAR));
+        ZwClose(hKey);
+
+        DbgLog("Device name saved to registry: %ws\n", shortName);
+    }
+    else {
+        DbgLog("Warning: Failed to save device name to registry: %08X\n", regStatus);
     }
 
     DriverObject->MajorFunction[IRP_MJ_CREATE] = DeviceCreate;
