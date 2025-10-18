@@ -909,171 +909,321 @@ NTSTATUS HandleCommand(
     NTSTATUS status = STATUS_SUCCESS;
     *bytesReturned = 0;
 
+    DbgLog("=== HandleCommand START ===\n");
+    DbgLog("Input Length: %lu\n", inputLength);
+    DbgLog("Output Length: %lu\n", outputLength);
+
     if (inputLength < sizeof(OBFUSCATED_REQUEST)) {
+        DbgLog("[-] Input buffer too small\n");
         return STATUS_INVALID_PARAMETER;
     }
 
     LARGE_INTEGER time;
     KeQuerySystemTime(&time);
-    ULONG expectedMagic = (ULONG)(time.QuadPart / 10000000 / 60);
-    expectedMagic ^= 0xDEADBEEF;
+    ULONG currentMinute = (ULONG)((time.QuadPart / 10000000) / 60);
+    ULONG expectedMagic = currentMinute ^ 0xDEADBEEF;
 
-    if (request->Magic != expectedMagic) {
-        DbgLog("Invalid magic: %08X (expected %08X)\n", request->Magic, expectedMagic);
+    DbgLog("Magic received: 0x%08X\n", request->Magic);
+    DbgLog("Magic expected: 0x%08X\n", expectedMagic);
+
+    ULONG prevMinuteMagic = (currentMinute - 1) ^ 0xDEADBEEF;
+    if (request->Magic != expectedMagic && request->Magic != prevMinuteMagic) {
+        DbgLog("[-] Invalid magic: %08X (expected %08X or %08X)\n",
+            request->Magic, expectedMagic, prevMinuteMagic);
         return STATUS_ACCESS_DENIED;
     }
 
+    // Validar command hash
     ULONG commandIndex;
     if (!ValidateCommandHash(request->CommandHash, &commandIndex)) {
-        DbgLog("Invalid command hash: %08X\n", request->CommandHash);
+        DbgLog("[-] Invalid command hash: %08X\n", request->CommandHash);
         return STATUS_INVALID_PARAMETER;
     }
+
+    DbgLog("[+] Command index: %lu\n", commandIndex);
 
     if (request->PayloadSize > 4096) {
+        DbgLog("[-] Payload too large: %lu\n", request->PayloadSize);
         return STATUS_INVALID_PARAMETER;
     }
 
+    DbgLog("[+] Payload size: %lu\n", request->PayloadSize);
+
+    // Descriptografar payload
     UCHAR decryptedPayload[4096];
     KIRQL oldIrql;
+
     KeAcquireSpinLock(&g_Context->IoctlMapLock, &oldIrql);
-    XorEncryptDecrypt(request->EncryptedPayload, request->PayloadSize,
-        g_Context->IoctlMap.XorKey, ENCRYPTION_KEY_SIZE);
+
+    // Copiar antes de descriptografar
     RtlCopyMemory(decryptedPayload, request->EncryptedPayload, request->PayloadSize);
+
+    // Descriptografar
+    XorEncryptDecrypt(decryptedPayload, request->PayloadSize,
+        g_Context->IoctlMap.XorKey, ENCRYPTION_KEY_SIZE);
+
     KeReleaseSpinLock(&g_Context->IoctlMapLock, oldIrql);
 
+    // Validar checksum
     ULONG calculatedChecksum = CalculateChecksum(decryptedPayload, request->PayloadSize);
+
+    DbgLog("Checksum received: 0x%08X\n", request->Checksum);
+    DbgLog("Checksum calculated: 0x%08X\n", calculatedChecksum);
+
     if (calculatedChecksum != request->Checksum) {
-        DbgLog("Checksum mismatch: %08X vs %08X\n", calculatedChecksum, request->Checksum);
+        DbgLog("[-] Checksum mismatch!\n");
         return STATUS_DATA_ERROR;
     }
 
+    DbgLog("[+] Checksum validated\n");
+
+    // Processar comando
     switch (commandIndex) {
     case CMD_SET_TARGET: {
+        DbgLog("[CMD] SET_TARGET\n");
+
         if (request->PayloadSize < sizeof(WCHAR) * 2) {
+            DbgLog("[-] Payload too small for SET_TARGET\n");
             status = STATUS_INVALID_PARAMETER;
             break;
         }
+
         PWCHAR targetName = (PWCHAR)decryptedPayload;
+
+        // Validar string unicode
+        BOOLEAN validString = FALSE;
+        for (ULONG i = 0; i < request->PayloadSize / sizeof(WCHAR); i++) {
+            if (targetName[i] == L'\0') {
+                validString = TRUE;
+                break;
+            }
+        }
+
+        if (!validString) {
+            DbgLog("[-] Invalid unicode string\n");
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
         g_Context->TargetProcessHash = CalculateHash(targetName);
-        DbgLog("Target set: %ws (hash=%08X)\n", targetName, g_Context->TargetProcessHash);
+
+        DbgLog("[+] Target set: %ws (hash=0x%08X)\n", targetName, g_Context->TargetProcessHash);
+        status = STATUS_SUCCESS;
         break;
     }
 
     case CMD_ENABLE_MONITOR: {
+        DbgLog("[CMD] ENABLE_MONITOR\n");
+
         if (request->PayloadSize < sizeof(BOOLEAN)) {
+            DbgLog("[-] Payload too small for ENABLE_MONITOR\n");
             status = STATUS_INVALID_PARAMETER;
             break;
         }
+
         BOOLEAN enable = *(PBOOLEAN)decryptedPayload;
         g_Context->MonitoringEnabled = enable;
-        DbgLog("Monitoring: %s\n", enable ? "enabled" : "disabled");
+
+        DbgLog("[+] Monitoring: %s\n", enable ? "ENABLED" : "DISABLED");
+        status = STATUS_SUCCESS;
         break;
     }
 
     case CMD_READ_MEMORY: {
-        if (request->PayloadSize < sizeof(MEMORY_OPERATION) ||
-            outputLength < sizeof(MEMORY_OPERATION)) {
+        DbgLog("[CMD] READ_MEMORY\n");
+
+        if (request->PayloadSize < sizeof(MEMORY_OPERATION)) {
+            DbgLog("[-] Payload too small for READ_MEMORY\n");
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        if (outputLength < sizeof(MEMORY_OPERATION)) {
+            DbgLog("[-] Output buffer too small\n");
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
+
         PMEMORY_OPERATION memOp = (PMEMORY_OPERATION)decryptedPayload;
         PMEMORY_OPERATION output = (PMEMORY_OPERATION)outputBuffer;
 
+        DbgLog("[+] Reading: PID=%p, Addr=%p, Size=%llu\n",
+            memOp->ProcessId, memOp->Address, memOp->Size);
+
         status = ReadProcessMemory(memOp->ProcessId, memOp->Address,
             output->Buffer, memOp->Size);
+
         if (NT_SUCCESS(status)) {
             *bytesReturned = (ULONG)(sizeof(MEMORY_OPERATION) + memOp->Size);
+            DbgLog("[+] Read successful, returning %lu bytes\n", *bytesReturned);
         }
-        DbgLog("Read memory: PID=%p, Addr=%p, Size=%llu, Status=%08X\n",
-            memOp->ProcessId, memOp->Address, memOp->Size, status);
+        else {
+            DbgLog("[-] Read failed: 0x%08X\n", status);
+        }
         break;
     }
 
     case CMD_WRITE_MEMORY: {
+        DbgLog("[CMD] WRITE_MEMORY\n");
+
         if (request->PayloadSize < sizeof(MEMORY_OPERATION)) {
+            DbgLog("[-] Payload too small for WRITE_MEMORY\n");
             status = STATUS_INVALID_PARAMETER;
             break;
         }
+
         PMEMORY_OPERATION memOp = (PMEMORY_OPERATION)decryptedPayload;
+
+        DbgLog("[+] Writing: PID=%p, Addr=%p, Size=%llu\n",
+            memOp->ProcessId, memOp->Address, memOp->Size);
+
         status = WriteProcessMemory(memOp->ProcessId, memOp->Address,
             memOp->Buffer, memOp->Size);
-        DbgLog("Write memory: PID=%p, Addr=%p, Size=%llu, Status=%08X\n",
-            memOp->ProcessId, memOp->Address, memOp->Size, status);
+
+        if (NT_SUCCESS(status)) {
+            DbgLog("[+] Write successful\n");
+        }
+        else {
+            DbgLog("[-] Write failed: 0x%08X\n", status);
+        }
         break;
     }
 
     case CMD_GET_MODULE: {
-        if (request->PayloadSize < sizeof(MODULE_REQUEST) ||
-            outputLength < sizeof(MODULE_RESPONSE)) {
+        DbgLog("[CMD] GET_MODULE\n");
+
+        if (request->PayloadSize < sizeof(MODULE_REQUEST)) {
+            DbgLog("[-] Payload too small for GET_MODULE\n");
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        if (outputLength < sizeof(MODULE_RESPONSE)) {
+            DbgLog("[-] Output buffer too small\n");
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
+
         PMODULE_REQUEST modReq = (PMODULE_REQUEST)decryptedPayload;
         PMODULE_RESPONSE modResp = (PMODULE_RESPONSE)outputBuffer;
+
+        DbgLog("[+] Getting module: %ws\n", modReq->ModuleName);
 
         ULONG hash = CalculateHash(modReq->ModuleName);
         status = GetModuleBase(modReq->ProcessId, hash,
             &modResp->BaseAddress, &modResp->Size);
+
         if (NT_SUCCESS(status)) {
             *bytesReturned = sizeof(MODULE_RESPONSE);
+            DbgLog("[+] Module found: Base=%p, Size=0x%X\n",
+                modResp->BaseAddress, modResp->Size);
         }
-        DbgLog("Get module: %ws, Status=%08X, Base=%p\n",
-            modReq->ModuleName, status, modResp->BaseAddress);
+        else {
+            DbgLog("[-] Module not found: 0x%08X\n", status);
+        }
         break;
     }
 
     case CMD_INSTALL_HOOK: {
+        DbgLog("[CMD] INSTALL_HOOK\n");
+
         if (request->PayloadSize < sizeof(HOOK_REQUEST)) {
+            DbgLog("[-] Payload too small for INSTALL_HOOK\n");
             status = STATUS_INVALID_PARAMETER;
             break;
         }
+
         PHOOK_REQUEST hookReq = (PHOOK_REQUEST)decryptedPayload;
+
+        DbgLog("[+] Installing hook: Addr=%p, Size=%lu\n",
+            hookReq->TargetAddress, hookReq->HookSize);
+
         status = InstallInlineHook(hookReq->ProcessId, hookReq->TargetAddress,
             hookReq->HookCode, hookReq->HookSize);
-        DbgLog("Install hook: Addr=%p, Size=%lu, Status=%08X\n",
-            hookReq->TargetAddress, hookReq->HookSize, status);
+
+        if (NT_SUCCESS(status)) {
+            DbgLog("[+] Hook installed\n");
+        }
+        else {
+            DbgLog("[-] Hook failed: 0x%08X\n", status);
+        }
         break;
     }
 
     case CMD_REMOVE_HOOK: {
-        if (request->PayloadSize < sizeof(PVOID)) {
+        DbgLog("[CMD] REMOVE_HOOK\n");
+
+        if (request->PayloadSize < sizeof(HANDLE) + sizeof(PVOID)) {
+            DbgLog("[-] Payload too small for REMOVE_HOOK\n");
             status = STATUS_INVALID_PARAMETER;
             break;
         }
+
         HANDLE pid = *(PHANDLE)decryptedPayload;
         PVOID addr = *(PVOID*)(decryptedPayload + sizeof(HANDLE));
+
+        DbgLog("[+] Removing hook: Addr=%p\n", addr);
+
         status = RemoveHook(pid, addr);
-        DbgLog("Remove hook: Addr=%p, Status=%08X\n", addr, status);
+
+        if (NT_SUCCESS(status)) {
+            DbgLog("[+] Hook removed\n");
+        }
+        else {
+            DbgLog("[-] Remove failed: 0x%08X\n", status);
+        }
         break;
     }
 
     case CMD_HIDE_PROCESS: {
+        DbgLog("[CMD] HIDE_PROCESS\n");
+
         if (request->PayloadSize < sizeof(HANDLE)) {
+            DbgLog("[-] Payload too small for HIDE_PROCESS\n");
             status = STATUS_INVALID_PARAMETER;
             break;
         }
+
         HANDLE pid = *(PHANDLE)decryptedPayload;
+
+        DbgLog("[+] Hiding process: PID=%p\n", pid);
+
         status = HideProcessFromList(pid);
-        DbgLog("Hide process: PID=%p, Status=%08X\n", pid, status);
+
+        if (NT_SUCCESS(status)) {
+            DbgLog("[+] Process hidden\n");
+        }
+        else {
+            DbgLog("[-] Hide failed: 0x%08X\n", status);
+        }
         break;
     }
 
     case CMD_PROTECT_PROCESS: {
+        DbgLog("[CMD] PROTECT_PROCESS\n");
+
         if (request->PayloadSize < sizeof(PROCESS_REQUEST)) {
+            DbgLog("[-] Payload too small for PROTECT_PROCESS\n");
             status = STATUS_INVALID_PARAMETER;
             break;
         }
+
         PPROCESS_REQUEST procReq = (PPROCESS_REQUEST)decryptedPayload;
-        DbgLog("Process protection active for: %ws\n", procReq->ProcessName);
+
+        DbgLog("[+] Protecting: %ws (PID=%p)\n",
+            procReq->ProcessName, procReq->ProcessId);
+
+        status = STATUS_SUCCESS;
         break;
     }
 
     default:
+        DbgLog("[-] Unknown command index: %lu\n", commandIndex);
         status = STATUS_NOT_IMPLEMENTED;
-        DbgLog("Unknown command index: %lu\n", commandIndex);
         break;
     }
 
+    DbgLog("=== HandleCommand END (Status=0x%08X) ===\n\n", status);
     return status;
 }
 

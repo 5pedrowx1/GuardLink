@@ -92,46 +92,67 @@ private:
     bool SendCommand(ULONG commandIndex, const void* data, SIZE_T dataSize,
         void* outputBuffer = nullptr, SIZE_T outputSize = 0,
         DWORD* bytesReturned = nullptr) {
+
         if (!authenticated) {
             printf("[-] Not authenticated\n");
             return false;
         }
 
+        printf("\n[DEBUG] SendCommand START\n");
+        printf("[DEBUG] Command Index: %lu\n", commandIndex);
+        printf("[DEBUG] Data Size: %llu\n", (ULONGLONG)dataSize);
+
+        // Calcular tamanho total
         SIZE_T totalSize = sizeof(OBFUSCATED_REQUEST) + dataSize;
         std::vector<BYTE> buffer(totalSize);
 
         POBFUSCATED_REQUEST request = (POBFUSCATED_REQUEST)buffer.data();
+        ZeroMemory(request, totalSize);
 
-        // Magic number (time-based)
-        ULONG currentMinute = (ULONG)((GetTickCount64() / 1000) / 60);
+        // Magic number baseado no minuto atual
+        ULONGLONG tickCount = GetTickCount64();
+        ULONG currentMinute = (ULONG)((tickCount / 1000) / 60);
         request->Magic = currentMinute ^ 0xDEADBEEF;
 
-        // Command hash
-        request->CommandHash = ioctlMap.CommandTable[commandIndex];
+        printf("[DEBUG] Current Minute: %lu\n", currentMinute);
+        printf("[DEBUG] Magic: 0x%08X\n", request->Magic);
 
-        // Payload
+        // Command hash da tabela sincronizada
+        request->CommandHash = ioctlMap.CommandTable[commandIndex];
+        printf("[DEBUG] Command Hash: 0x%08X\n", request->CommandHash);
+
+        // Copiar payload
         request->PayloadSize = (ULONG)dataSize;
         if (data && dataSize > 0) {
             memcpy(request->EncryptedPayload, data, dataSize);
+            printf("[DEBUG] Payload copied: %llu bytes\n", (ULONGLONG)dataSize);
         }
 
-        // Checksum antes de criptografar
+        // Calcular checksum ANTES de criptografar
         request->Checksum = CalculateChecksum(request->EncryptedPayload, request->PayloadSize);
+        printf("[DEBUG] Checksum: 0x%08X\n", request->Checksum);
 
-        // Criptografa payload
+        // Criptografar payload
         XorEncryptDecrypt(request->EncryptedPayload, request->PayloadSize,
             ioctlMap.XorKey, ENCRYPTION_KEY_SIZE);
+        printf("[DEBUG] Payload encrypted\n");
 
         // Padding aleatório
         for (int i = 0; i < 4; i++) {
             request->Padding[i] = rand();
         }
 
-        // Envia comando
+        // Preparar buffers
         DWORD dummy;
         if (!bytesReturned) bytesReturned = &dummy;
 
+        *bytesReturned = 0;
+
         DWORD genericIoctl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS);
+        printf("[DEBUG] IOCTL Code: 0x%08X\n", genericIoctl);
+
+        // Chamar DeviceIoControl
+        printf("[DEBUG] Calling DeviceIoControl...\n");
 
         BOOL result = DeviceIoControl(
             hDriver,
@@ -143,9 +164,35 @@ private:
         );
 
         if (!result) {
-            printf("[-] DeviceIoControl failed: %lu\n", GetLastError());
+            DWORD error = GetLastError();
+            printf("[-] DeviceIoControl failed: %lu (0x%08X)\n", error, error);
+
+            // Diagnóstico adicional
+            switch (error) {
+            case ERROR_ACCESS_DENIED:
+                printf("    -> ACCESS DENIED: Check driver is loaded and has permissions\n");
+                break;
+            case ERROR_INVALID_PARAMETER:
+                printf("    -> INVALID PARAMETER: Check IOCTL code and buffer sizes\n");
+                break;
+            case ERROR_NOT_SUPPORTED:
+                printf("    -> NOT SUPPORTED: IOCTL not recognized by driver\n");
+                break;
+            case ERROR_GEN_FAILURE:
+                printf("    -> GENERAL FAILURE: Driver returned error status\n");
+                break;
+            default:
+                printf("    -> See https://docs.microsoft.com/windows/win32/debug/system-error-codes\n");
+                break;
+            }
+
+            printf("[DEBUG] SendCommand END (FAILED)\n\n");
             return false;
         }
+
+        printf("[+] DeviceIoControl succeeded\n");
+        printf("[+] Bytes returned: %lu\n", *bytesReturned);
+        printf("[DEBUG] SendCommand END (SUCCESS)\n\n");
 
         return true;
     }
