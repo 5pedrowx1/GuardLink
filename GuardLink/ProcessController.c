@@ -1,6 +1,7 @@
 ﻿#include <ntddk.h>
 #include <ntimage.h>
 #include <ntstrsafe.h>
+#include <wdmsec.h>
 #include "shared_defs.h"
 
 // Declarações forward necessárias de ntifs.h sem incluir o header completo
@@ -40,7 +41,15 @@ NTKERNELAPI VOID KeUnstackDetachProcess(
 #define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
 #define PROCESS_SUSPEND_RESUME 0x0800
 #define PROCESS_TERMINATE 0x0001
- 
+
+#ifndef SDDL_REVISION_1
+#define SDDL_REVISION_1 1
+#endif
+
+#ifndef SDDL_REVISION
+#define SDDL_REVISION SDDL_REVISION_1
+#endif
+
 #define _DEBUG
 
 #ifdef _DEBUG
@@ -679,6 +688,47 @@ NTSTATUS AnsiToUnicode(PCHAR AnsiString, PWCHAR UnicodeBuffer, ULONG BufferSize)
     return RtlAnsiStringToUnicodeString(&unicode, &ansi, FALSE);
 }
 
+VOID ThreadNotifyCallback(
+    _In_ HANDLE ProcessId,
+    _In_ HANDLE ThreadId,
+    _In_ BOOLEAN Create)
+{
+    UNREFERENCED_PARAMETER(ProcessId);
+    UNREFERENCED_PARAMETER(ThreadId);
+    UNREFERENCED_PARAMETER(Create);
+}
+
+VOID ImageLoadCallback(
+    _In_opt_ PUNICODE_STRING FullImageName,
+    _In_ HANDLE ProcessId,
+    _In_ PIMAGE_INFO ImageInfo)
+{
+    UNREFERENCED_PARAMETER(ImageInfo);
+
+    if (g_Context->MonitoringEnabled && FullImageName && FullImageName->Buffer) {
+        WCHAR* fileName = wcsrchr(FullImageName->Buffer, L'\\');
+        if (fileName) {
+            fileName++;
+
+            const WCHAR* antiCheatDlls[] = {
+                L"BEService.dll",
+                L"BEDaisy.sys",
+                L"EasyAntiCheat.dll",
+                L"vgk.sys",
+                L"vgc.exe"
+            };
+
+            for (int i = 0; i < sizeof(antiCheatDlls) / sizeof(WCHAR*); i++) {
+                if (_wcsicmp(fileName, antiCheatDlls[i]) == 0) {
+                    DbgLog("Anti-cheat detected: %ws in PID=%p\n", fileName, ProcessId);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+
 VOID ProcessNotifyCallback(
     _In_ HANDLE ParentId,
     _In_ HANDLE ProcessId,
@@ -764,46 +814,6 @@ VOID ProcessNotifyCallback(
     }
 }
 
-VOID ThreadNotifyCallback(
-    _In_ HANDLE ProcessId,
-    _In_ HANDLE ThreadId,
-    _In_ BOOLEAN Create)
-{
-    UNREFERENCED_PARAMETER(ProcessId);
-    UNREFERENCED_PARAMETER(ThreadId);
-    UNREFERENCED_PARAMETER(Create);
-}
-
-VOID ImageLoadCallback(
-    _In_opt_ PUNICODE_STRING FullImageName,
-    _In_ HANDLE ProcessId,
-    _In_ PIMAGE_INFO ImageInfo)
-{
-    UNREFERENCED_PARAMETER(ImageInfo);
-
-    if (g_Context->MonitoringEnabled && FullImageName && FullImageName->Buffer) {
-        WCHAR* fileName = wcsrchr(FullImageName->Buffer, L'\\');
-        if (fileName) {
-            fileName++;
-
-            const WCHAR* antiCheatDlls[] = {
-                L"BEService.dll",
-                L"BEDaisy.sys",
-                L"EasyAntiCheat.dll",
-                L"vgk.sys",
-                L"vgc.exe"
-            };
-
-            for (int i = 0; i < sizeof(antiCheatDlls) / sizeof(WCHAR*); i++) {
-                if (_wcsicmp(fileName, antiCheatDlls[i]) == 0) {
-                    DbgLog("Anti-cheat detected: %ws in PID=%p\n", fileName, ProcessId);
-                    break;
-                }
-            }
-        }
-    }
-}
-
 // ==================== HANDSHAKE ====================
 
 NTSTATUS HandleHandshake(
@@ -874,7 +884,7 @@ NTSTATUS HandleHandshake(
 
     response->ServerVersion = 1;
     response->ServerTimestamp = g_Context->IoctlMap.Timestamp;
-    
+
     DbgLog("[+] Copying IOCTL map (size: %llu)\n", sizeof(DYNAMIC_IOCTL_MAP));
     RtlCopyMemory(&response->IoctlMap, &g_Context->IoctlMap, sizeof(DYNAMIC_IOCTL_MAP));
 
@@ -1405,33 +1415,58 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
     GenerateRandomDeviceName(deviceNameBuffer, sizeof(deviceNameBuffer), DEVICE_NAME_SEED);
     RtlInitUnicodeString(&deviceName, deviceNameBuffer);
 
-    status = IoCreateDevice(DriverObject, 0, &deviceName, FILE_DEVICE_UNKNOWN,
-        FILE_DEVICE_SECURE_OPEN, FALSE, &g_Context->DeviceObject);
+    UNICODE_STRING sddlString;
+    RtlInitUnicodeString(&sddlString,
+        L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;WD)");
+
+    status = IoCreateDeviceSecure(
+        DriverObject,
+        0,
+        &deviceName,
+        FILE_DEVICE_UNKNOWN,
+        FILE_DEVICE_SECURE_OPEN,
+        FALSE,
+        &sddlString,
+        NULL,
+        &g_Context->DeviceObject
+    );
 
     if (!NT_SUCCESS(status)) {
+        DbgLog("[-] IoCreateDeviceSecure failed: 0x%08X\n", status);
         ExFreePoolWithTag(g_Context, TAG_POOL);
         return status;
     }
 
+    DbgLog("[+] Device created successfully with SDDL security\n");
+
+    // Criar symbolic link
     RtlStringCbCopyW(dosNameBuffer, sizeof(dosNameBuffer), L"\\DosDevices\\");
     RtlStringCbCatW(dosNameBuffer, sizeof(dosNameBuffer), deviceNameBuffer + 9);
     RtlInitUnicodeString(&dosDeviceName, dosNameBuffer);
 
     status = IoCreateSymbolicLink(&dosDeviceName, &deviceName);
     if (!NT_SUCCESS(status)) {
+        DbgLog("[-] IoCreateSymbolicLink failed: 0x%08X\n", status);
         IoDeleteDevice(g_Context->DeviceObject);
         ExFreePoolWithTag(g_Context, TAG_POOL);
         return status;
     }
 
-    UNICODE_STRING regPath;
-    RtlInitUnicodeString(&regPath, L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\GuardLink\\Parameters");
+    DbgLog("[+] Symbolic link created successfully\n");
 
-    OBJECT_ATTRIBUTES objAttr;
-    InitializeObjectAttributes(&objAttr, &regPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    // Salvar device name no registro
+    UNICODE_STRING regPath;
+    RtlInitUnicodeString(&regPath,
+        L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\GuardLink\\Parameters");
+
+    OBJECT_ATTRIBUTES regObjAttr;
+    InitializeObjectAttributes(&regObjAttr, &regPath,
+        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
 
     HANDLE hKey;
-    NTSTATUS regStatus = ZwCreateKey(&hKey, KEY_WRITE, &objAttr, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+    NTSTATUS regStatus = ZwCreateKey(&hKey, KEY_WRITE, &regObjAttr,
+        0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+
     if (NT_SUCCESS(regStatus)) {
         UNICODE_STRING valueName;
         RtlInitUnicodeString(&valueName, L"DeviceName");
@@ -1439,7 +1474,8 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
         WCHAR shortName[256];
         RtlStringCbCopyW(shortName, sizeof(shortName), dosNameBuffer + 12);
 
-        ZwSetValueKey(hKey, &valueName, 0, REG_SZ, shortName, (ULONG)(wcslen(shortName) + 1) * sizeof(WCHAR));
+        ZwSetValueKey(hKey, &valueName, 0, REG_SZ, shortName,
+            (ULONG)(wcslen(shortName) + 1) * sizeof(WCHAR));
         ZwClose(hKey);
 
         DbgLog("Device name saved to registry: %ws\n", shortName);
@@ -1448,35 +1484,45 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
         DbgLog("Warning: Failed to save device name to registry: %08X\n", regStatus);
     }
 
+    // Configurar dispatch routines
     DriverObject->MajorFunction[IRP_MJ_CREATE] = DeviceCreate;
     DriverObject->MajorFunction[IRP_MJ_CLOSE] = DeviceClose;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DeviceControl;
     DriverObject->DriverUnload = DriverUnload;
 
+    // Registrar callbacks
     status = PsSetCreateProcessNotifyRoutine(ProcessNotifyCallback, FALSE);
-    if (!NT_SUCCESS(status)) goto Cleanup;
+    if (!NT_SUCCESS(status)) {
+        DbgLog("[-] PsSetCreateProcessNotifyRoutine failed: 0x%08X\n", status);
+        goto Cleanup;
+    }
 
     status = PsSetCreateThreadNotifyRoutine(ThreadNotifyCallback);
     if (!NT_SUCCESS(status)) {
+        DbgLog("[-] PsSetCreateThreadNotifyRoutine failed: 0x%08X\n", status);
         PsSetCreateProcessNotifyRoutine(ProcessNotifyCallback, TRUE);
         goto Cleanup;
     }
 
     status = PsSetLoadImageNotifyRoutine(ImageLoadCallback);
     if (!NT_SUCCESS(status)) {
+        DbgLog("[-] PsSetLoadImageNotifyRoutine failed: 0x%08X\n", status);
         PsRemoveCreateThreadNotifyRoutine(ThreadNotifyCallback);
-        PsSetCreateProcessNotifyRoutine(ProcessNotifyCallback, TRUE);
+		PsSetCreateProcessNotifyRoutine(ProcessNotifyCallback, TRUE);
         goto Cleanup;
     }
 
     status = RegisterProcessProtection();
     if (!NT_SUCCESS(status)) {
-        DbgLog("Warning: Failed to register process protection\n");
+        DbgLog("Warning: Failed to register process protection: 0x%08X\n", status);
+        // Não é crítico, continuar mesmo assim
     }
 
-    DbgLog("Driver loaded successfully\n");
+    DbgLog("========================================\n");
+    DbgLog("[+] Driver loaded successfully!\n");
     DbgLog("Device: %ws\n", deviceNameBuffer);
     DbgLog("DosDevice: %ws\n", dosNameBuffer);
+    DbgLog("========================================\n");
 
     return STATUS_SUCCESS;
 

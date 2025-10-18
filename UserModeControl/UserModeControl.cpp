@@ -110,8 +110,8 @@ private:
         ZeroMemory(request, totalSize);
 
         // Magic number baseado no minuto atual
-        ULONGLONG tickCount = GetTickCount64();
-        ULONG currentMinute = (ULONG)((tickCount / 1000) / 60);
+        ULONG currentTimestamp = GetWindowsTimestamp(); 
+        ULONG currentMinute = currentTimestamp / 60;
         request->Magic = currentMinute ^ 0xDEADBEEF;
 
         printf("[DEBUG] Current Minute: %lu\n", currentMinute);
