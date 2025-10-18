@@ -40,6 +40,8 @@ NTKERNELAPI VOID KeUnstackDetachProcess(
 #define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
 #define PROCESS_SUSPEND_RESUME 0x0800
 #define PROCESS_TERMINATE 0x0001
+ 
+#define _DEBUG
 
 #ifdef _DEBUG
 #define DbgLog(fmt, ...) DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[Drv] " fmt, __VA_ARGS__)
@@ -221,20 +223,25 @@ NTSTATUS InitializeObfuscatedIoctl() {
 
     KeInitializeSpinLock(&g_Context->IoctlMapLock);
 
-    g_Context->IoctlMap.Timestamp = (ULONG)(time.QuadPart & 0xFFFFFFFF);
+    g_Context->IoctlMap.Timestamp = (ULONG)(time.QuadPart / 10000000);  // Timestamp em segundos
     g_Context->IoctlMap.RandomSeed = (ULONG)((time.QuadPart >> 32) & 0xFFFFFFFF);
+
+    DbgLog("=== Initializing IOCTL Map ===\n");
+    DbgLog("Timestamp: %lu\n", g_Context->IoctlMap.Timestamp);
+    DbgLog("Random Seed: 0x%08X\n", g_Context->IoctlMap.RandomSeed);
 
     ULONG seed = g_Context->IoctlMap.RandomSeed;
     for (int i = 0; i < MAX_COMMANDS; i++) {
         seed = (seed * 1103515245 + 12345);
         g_Context->IoctlMap.CommandTable[i] = seed;
+        DbgLog("Command[%d] = 0x%08X\n", i, g_Context->IoctlMap.CommandTable[i]);
     }
 
     GenerateEncryptionKey(g_Context->IoctlMap.XorKey, ENCRYPTION_KEY_SIZE);
     g_Context->LastUpdate = time;
 
-    DbgLog("IOCTL Map initialized: Timestamp=%lu, Seed=%08X\n",
-        g_Context->IoctlMap.Timestamp, g_Context->IoctlMap.RandomSeed);
+    DbgLog("IOCTL Map initialized successfully\n");
+    DbgLog("================================\n");
 
     return STATUS_SUCCESS;
 }
@@ -806,36 +813,72 @@ NTSTATUS HandleHandshake(
     _In_ ULONG OutputLength,
     _Out_ PULONG BytesReturned)
 {
-    if (InputLength < sizeof(HANDSHAKE_REQUEST) ||
-        OutputLength < sizeof(HANDSHAKE_RESPONSE)) {
+    DbgLog("=== HandleHandshake START ===\n");
+    DbgLog("InputLength: %lu, OutputLength: %lu\n", InputLength, OutputLength);
+
+    // Validação de tamanhos
+    if (InputLength < sizeof(HANDSHAKE_REQUEST)) {
+        DbgLog("[-] Input buffer too small: %lu < %llu\n", InputLength, sizeof(HANDSHAKE_REQUEST));
+        *BytesReturned = 0;
         return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    if (OutputLength < sizeof(HANDSHAKE_RESPONSE)) {
+        DbgLog("[-] Output buffer too small: %lu < %llu\n", OutputLength, sizeof(HANDSHAKE_RESPONSE));
+        *BytesReturned = 0;
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    // Validação de ponteiros
+    if (!InputBuffer || !OutputBuffer || !BytesReturned) {
+        DbgLog("[-] NULL pointer detected\n");
+        *BytesReturned = 0;
+        return STATUS_INVALID_PARAMETER;
     }
 
     PHANDSHAKE_REQUEST request = (PHANDSHAKE_REQUEST)InputBuffer;
     PHANDSHAKE_RESPONSE response = (PHANDSHAKE_RESPONSE)OutputBuffer;
 
+    DbgLog("[+] Request Version: %lu\n", request->ClientVersion);
+    DbgLog("[+] Request Timestamp: %lu\n", request->ClientTimestamp);
+
+    // Validar versão
     if (request->ClientVersion != 1) {
+        DbgLog("[-] Version mismatch: %lu != 1\n", request->ClientVersion);
+        *BytesReturned = 0;
         return STATUS_REVISION_MISMATCH;
     }
 
+    // Obter timestamp atual
     LARGE_INTEGER currentTime;
     KeQuerySystemTime(&currentTime);
     ULONG currentTimestamp = (ULONG)(currentTime.QuadPart / 10000000);
 
+    DbgLog("[+] Server Timestamp: %lu\n", currentTimestamp);
+
     LONG timeDiff = (LONG)(currentTimestamp - request->ClientTimestamp);
     if (timeDiff < 0) timeDiff = -timeDiff;
 
-    if (timeDiff > 30) {
+    DbgLog("[+] Time difference: %ld seconds\n", timeDiff);
+
+    if (timeDiff > 300) {
+        DbgLog("[-] Timestamp too old: %ld > 300\n", timeDiff);
+        *BytesReturned = 0;
         return STATUS_TIMEOUT;
     }
 
     KIRQL oldIrql;
     KeAcquireSpinLock(&g_Context->IoctlMapLock, &oldIrql);
 
+    RtlZeroMemory(response, sizeof(HANDSHAKE_RESPONSE));
+
     response->ServerVersion = 1;
     response->ServerTimestamp = g_Context->IoctlMap.Timestamp;
+    
+    DbgLog("[+] Copying IOCTL map (size: %llu)\n", sizeof(DYNAMIC_IOCTL_MAP));
     RtlCopyMemory(&response->IoctlMap, &g_Context->IoctlMap, sizeof(DYNAMIC_IOCTL_MAP));
 
+    // Gerar nonce do servidor
     ULONG seed = g_Context->IoctlMap.RandomSeed ^ currentTimestamp;
     for (int i = 0; i < 32; i++) {
         seed = (seed * 1103515245 + 12345);
@@ -846,7 +889,10 @@ NTSTATUS HandleHandshake(
 
     *BytesReturned = sizeof(HANDSHAKE_RESPONSE);
 
-    DbgLog("Handshake completed with client\n");
+    DbgLog("[+] Handshake successful! Returning %lu bytes\n", *BytesReturned);
+    DbgLog("[+] Response Version: %lu\n", response->ServerVersion);
+    DbgLog("[+] Response Timestamp: %lu\n", response->ServerTimestamp);
+    DbgLog("=== HandleHandshake END ===\n");
 
     return STATUS_SUCCESS;
 }
@@ -1044,19 +1090,48 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
     ULONG outputLength = irpStack->Parameters.DeviceIoControl.OutputBufferLength;
     ULONG ioControlCode = irpStack->Parameters.DeviceIoControl.IoControlCode;
 
+    DbgLog("\n=== DeviceControl Called ===\n");
+    DbgLog("IOCTL Code: 0x%08X\n", ioControlCode);
+    DbgLog("Input Length: %lu\n", inputLength);
+    DbgLog("Output Length: %lu\n", outputLength);
+    DbgLog("Input Buffer: %p\n", inputBuffer);
+    DbgLog("Output Buffer: %p\n", outputBuffer);
+
     ULONG handshakeIoctl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS);
+    ULONG commandIoctl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
+    DbgLog("Expected Handshake IOCTL: 0x%08X\n", handshakeIoctl);
+    DbgLog("Expected Command IOCTL: 0x%08X\n", commandIoctl);
 
     if (ioControlCode == handshakeIoctl) {
+        DbgLog("[+] Handshake IOCTL detected\n");
         status = HandleHandshake(inputBuffer, inputLength, outputBuffer,
             outputLength, &bytesReturned);
+
+        DbgLog("HandleHandshake returned: 0x%08X\n", status);
+        DbgLog("Bytes to return: %lu\n", bytesReturned);
     }
-    else {
+    else if (ioControlCode == commandIoctl) {
+        DbgLog("[+] Command IOCTL detected\n");
         status = HandleCommand((POBFUSCATED_REQUEST)inputBuffer, inputLength,
             outputBuffer, outputLength, &bytesReturned);
+
+        DbgLog("HandleCommand returned: 0x%08X\n", status);
+        DbgLog("Bytes to return: %lu\n", bytesReturned);
+    }
+    else {
+        DbgLog("[-] Unknown IOCTL: 0x%08X\n", ioControlCode);
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        bytesReturned = 0;
     }
 
     Irp->IoStatus.Status = status;
     Irp->IoStatus.Information = bytesReturned;
+
+    DbgLog("Final Status: 0x%08X\n", status);
+    DbgLog("Final Information: %lu\n", bytesReturned);
+    DbgLog("=== DeviceControl End ===\n\n");
+
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return status;
 }

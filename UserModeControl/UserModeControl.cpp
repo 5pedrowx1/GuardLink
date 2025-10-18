@@ -10,6 +10,17 @@
 
 // ==================== UTILITY FUNCTIONS ====================
 
+static ULONG GetWindowsTimestamp() {
+    FILETIME ft;
+    ULARGE_INTEGER uli;
+
+    GetSystemTimeAsFileTime(&ft);
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+
+    return (ULONG)(uli.QuadPart / 10000000ULL);
+}
+
 static ULONG CalculateHash(const WCHAR* str) {
     if (!str) return 0;
 
@@ -86,15 +97,12 @@ private:
             return false;
         }
 
-        // Calcula tamanho total
         SIZE_T totalSize = sizeof(OBFUSCATED_REQUEST) + dataSize;
         std::vector<BYTE> buffer(totalSize);
 
         POBFUSCATED_REQUEST request = (POBFUSCATED_REQUEST)buffer.data();
 
         // Magic number (time-based)
-        LARGE_INTEGER time;
-        QueryPerformanceCounter(&time);
         ULONG currentMinute = (ULONG)((GetTickCount64() / 1000) / 60);
         request->Magic = currentMinute ^ 0xDEADBEEF;
 
@@ -119,7 +127,7 @@ private:
             request->Padding[i] = rand();
         }
 
-        // Envia comando (usa IOCTL genérico)
+        // Envia comando
         DWORD dummy;
         if (!bytesReturned) bytesReturned = &dummy;
 
@@ -159,7 +167,6 @@ public:
             wcscpy_s(finalName, deviceName);
         }
         else {
-            // Lê do registry
             HKEY hKey;
             if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                 L"System\\CurrentControlSet\\Services\\GuardLink\\Parameters",
@@ -228,7 +235,7 @@ public:
         HANDSHAKE_RESPONSE response = { 0 };
 
         request.ClientVersion = 1;
-        request.ClientTimestamp = (ULONG)(GetTickCount64() / 1000);
+        request.ClientTimestamp = GetWindowsTimestamp();
 
         // Gera nonce
         for (int i = 0; i < 32; i++) {
@@ -239,6 +246,7 @@ public:
         DWORD handshakeIoctl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS);
 
         printf("[*] Performing handshake...\n");
+        printf("[*] Client timestamp: %lu\n", request.ClientTimestamp);
 
         BOOL result = DeviceIoControl(
             hDriver,
@@ -249,8 +257,14 @@ public:
             nullptr
         );
 
-        if (!result || bytesReturned != sizeof(response)) {
-            printf("[-] Handshake failed: %lu\n", GetLastError());
+        if (!result) {
+            printf("[-] Handshake DeviceIoControl failed: %lu\n", GetLastError());
+            return false;
+        }
+
+        if (bytesReturned != sizeof(response)) {
+            printf("[-] Handshake failed: received %lu bytes (expected %zu)\n",
+                bytesReturned, sizeof(response));
             return false;
         }
 
