@@ -10,9 +10,16 @@ namespace GTATrainer
 
         private const string DEVICE_PATH = @"\\.\Global\GuardLink";
 
-        private const uint IOCTL_READ_MEMORY = 0x222008;   // CTL_CODE(0x8000, 2, 0, 0)
-        private const uint IOCTL_WRITE_MEMORY = 0x22200C;  // CTL_CODE(0x8000, 3, 0, 0)
-        private const uint IOCTL_GET_MODULE = 0x222010;    // CTL_CODE(0x8000, 4, 0, 0)
+        // IOCTLs CORRETOS - devem corresponder ao driver
+        private const uint IOCTL_SET_TARGET = 0x22002000;
+        private const uint IOCTL_ENABLE_MONITOR = 0x22002004;
+        private const uint IOCTL_READ_MEMORY = 0x22002008;
+        private const uint IOCTL_WRITE_MEMORY = 0x2200200C;
+        private const uint IOCTL_GET_MODULE = 0x22002010;
+        private const uint IOCTL_INSTALL_HOOK = 0x22002014;
+        private const uint IOCTL_REMOVE_HOOK = 0x22002018;
+        private const uint IOCTL_HIDE_PROCESS = 0x2200201C;
+        private const uint IOCTL_PROTECT_PROCESS = 0x22002020;
 
         // ==================== STRUCTURES ====================
 
@@ -22,7 +29,7 @@ namespace GTATrainer
             public IntPtr ProcessId;
             public IntPtr Address;
             public ulong Size;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 1)]
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4096)]
             public byte[] Buffer;
         }
 
@@ -64,86 +71,109 @@ namespace GTATrainer
             out uint lpBytesReturned,
             IntPtr lpOverlapped);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
         // ==================== FIELDS ====================
 
         private SafeFileHandle _driverHandle;
+        private bool _disposed = false;
 
         // ==================== CONSTRUCTOR ====================
 
         public GuardLinkDriver()
         {
+            Console.WriteLine("[*] Opening driver connection...");
+            Console.WriteLine($"[*] Device path: {DEVICE_PATH}");
+
             _driverHandle = CreateFile(
                 DEVICE_PATH,
                 0xC0000000, // GENERIC_READ | GENERIC_WRITE
-                0,
+                0,          // No sharing
                 IntPtr.Zero,
-                3, // OPEN_EXISTING
-                0,
+                3,          // OPEN_EXISTING
+                0x80,       // FILE_ATTRIBUTE_NORMAL
                 IntPtr.Zero);
 
             if (_driverHandle.IsInvalid)
             {
-                throw new Exception($"Failed to open driver: {Marshal.GetLastWin32Error()}");
+                int error = Marshal.GetLastWin32Error();
+                string errorMsg = GetWin32ErrorMessage(error);
+                throw new Exception($"Failed to open driver: Error {error} (0x{error:X}) - {errorMsg}");
             }
+
+            Console.WriteLine("[+] Driver connection established");
         }
 
         // ==================== PUBLIC METHODS ====================
 
         public byte[] ReadMemory(int processId, IntPtr address, int size)
         {
-            // Alocar buffer para request
-            int requestSize = Marshal.SizeOf<MEMORY_OPERATION>() + size - 1;
-            IntPtr requestPtr = Marshal.AllocHGlobal(requestSize);
-            IntPtr responsePtr = Marshal.AllocHGlobal(requestSize);
+            if (size <= 0 || size > 4096)
+                throw new ArgumentException("Size must be between 1 and 4096 bytes");
+
+            // Calcular tamanho total da estrutura
+            int structSize = Marshal.SizeOf<MEMORY_OPERATION>();
+            int totalSize = structSize + size - 4096; // Subtrair o tamanho do buffer padrão
+
+            IntPtr inBuffer = Marshal.AllocHGlobal(totalSize);
+            IntPtr outBuffer = Marshal.AllocHGlobal(totalSize);
 
             try
             {
-                // Preparar request
+                // Preparar estrutura de input
                 var request = new MEMORY_OPERATION
                 {
                     ProcessId = new IntPtr(processId),
                     Address = address,
                     Size = (ulong)size,
-                    Buffer = new byte[1]
+                    Buffer = new byte[4096] // Buffer temporário
                 };
 
-                Marshal.StructureToPtr(request, requestPtr, false);
+                Marshal.StructureToPtr(request, inBuffer, false);
 
                 // Chamar driver
-                bool result = DeviceIoControl(
+                bool success = DeviceIoControl(
                     _driverHandle,
                     IOCTL_READ_MEMORY,
-                    requestPtr,
-                    (uint)requestSize,
-                    responsePtr,
-                    (uint)requestSize,
+                    inBuffer,
+                    (uint)totalSize,
+                    outBuffer,
+                    (uint)totalSize,
                     out uint bytesReturned,
                     IntPtr.Zero);
 
-                if (!result)
+                if (!success)
                 {
-                    throw new Exception($"ReadMemory failed: {Marshal.GetLastWin32Error()}");
+                    int error = Marshal.GetLastWin32Error();
+                    throw new Exception($"ReadMemory failed: Error {error} (0x{error:X}) - {GetWin32ErrorMessage(error)}");
                 }
 
-                // Extrair dados
-                byte[] data = new byte[size];
-                IntPtr bufferOffset = IntPtr.Add(responsePtr,
-                    Marshal.OffsetOf<MEMORY_OPERATION>("Buffer").ToInt32());
-                Marshal.Copy(bufferOffset, data, 0, size);
+                // Extrair dados do output
+                var response = Marshal.PtrToStructure<MEMORY_OPERATION>(outBuffer);
 
-                return data;
+                // Copiar apenas os bytes necessários
+                byte[] result = new byte[size];
+                Array.Copy(response.Buffer, result, size);
+
+                return result;
             }
             finally
             {
-                Marshal.FreeHGlobal(requestPtr);
-                Marshal.FreeHGlobal(responsePtr);
+                Marshal.FreeHGlobal(inBuffer);
+                Marshal.FreeHGlobal(outBuffer);
             }
         }
 
         public bool WriteMemory(int processId, IntPtr address, byte[] data)
         {
-            int requestSize = Marshal.SizeOf<MEMORY_OPERATION>() + data.Length - 1;
-            IntPtr requestPtr = Marshal.AllocHGlobal(requestSize);
+            if (data == null || data.Length == 0 || data.Length > 4096)
+                throw new ArgumentException("Data must be between 1 and 4096 bytes");
+
+            int structSize = Marshal.SizeOf<MEMORY_OPERATION>();
+            int totalSize = structSize + data.Length - 4096;
+
+            IntPtr inBuffer = Marshal.AllocHGlobal(totalSize);
 
             try
             {
@@ -152,68 +182,88 @@ namespace GTATrainer
                     ProcessId = new IntPtr(processId),
                     Address = address,
                     Size = (ulong)data.Length,
-                    Buffer = new byte[1]
+                    Buffer = new byte[4096]
                 };
 
-                Marshal.StructureToPtr(request, requestPtr, false);
+                // Copiar dados para o buffer
+                Array.Copy(data, request.Buffer, data.Length);
 
-                // Copiar dados
-                IntPtr bufferOffset = IntPtr.Add(requestPtr,
-                    Marshal.OffsetOf<MEMORY_OPERATION>("Buffer").ToInt32());
-                Marshal.Copy(data, 0, bufferOffset, data.Length);
+                Marshal.StructureToPtr(request, inBuffer, false);
 
-                bool result = DeviceIoControl(
+                bool success = DeviceIoControl(
                     _driverHandle,
                     IOCTL_WRITE_MEMORY,
-                    requestPtr,
-                    (uint)requestSize,
+                    inBuffer,
+                    (uint)totalSize,
                     IntPtr.Zero,
                     0,
                     out _,
                     IntPtr.Zero);
 
-                return result;
+                if (!success)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    Console.WriteLine($"[-] WriteMemory failed: Error {error} (0x{error:X}) - {GetWin32ErrorMessage(error)}");
+                    return false;
+                }
+
+                return true;
             }
             finally
             {
-                Marshal.FreeHGlobal(requestPtr);
+                Marshal.FreeHGlobal(inBuffer);
             }
         }
 
         public IntPtr GetModuleBase(int processId, string moduleName)
         {
+            Console.WriteLine($"[*] GetModuleBase: PID={processId}, Module={moduleName}");
+
             var request = new MODULE_REQUEST
             {
                 ProcessId = new IntPtr(processId),
                 ModuleName = moduleName
             };
 
-            IntPtr requestPtr = Marshal.AllocHGlobal(Marshal.SizeOf<MODULE_REQUEST>());
-            IntPtr responsePtr = Marshal.AllocHGlobal(Marshal.SizeOf<MODULE_RESPONSE>());
+            var response = new MODULE_RESPONSE();
+
+            int inSize = Marshal.SizeOf<MODULE_REQUEST>();
+            int outSize = Marshal.SizeOf<MODULE_RESPONSE>();
+
+            IntPtr inBuffer = Marshal.AllocHGlobal(inSize);
+            IntPtr outBuffer = Marshal.AllocHGlobal(outSize);
 
             try
             {
-                Marshal.StructureToPtr(request, requestPtr, false);
+                Marshal.StructureToPtr(request, inBuffer, false);
 
-                bool result = DeviceIoControl(
+                bool success = DeviceIoControl(
                     _driverHandle,
                     IOCTL_GET_MODULE,
-                    requestPtr,
-                    (uint)Marshal.SizeOf<MODULE_REQUEST>(),
-                    responsePtr,
-                    (uint)Marshal.SizeOf<MODULE_RESPONSE>(),
-                    out _,
+                    inBuffer,
+                    (uint)inSize,
+                    outBuffer,
+                    (uint)outSize,
+                    out uint bytesReturned,
                     IntPtr.Zero);
 
-                if (!result) return IntPtr.Zero;
+                if (!success)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    string errorMsg = GetWin32ErrorMessage(error);
+                    Console.WriteLine($"[-] GetModuleBase failed: Error {error} (0x{error:X}) - {errorMsg}");
+                    return IntPtr.Zero;
+                }
 
-                var response = Marshal.PtrToStructure<MODULE_RESPONSE>(responsePtr);
+                response = Marshal.PtrToStructure<MODULE_RESPONSE>(outBuffer);
+                Console.WriteLine($"[+] Module base: 0x{response.BaseAddress.ToInt64():X16}, Size: 0x{response.Size:X}");
+
                 return response.BaseAddress;
             }
             finally
             {
-                Marshal.FreeHGlobal(requestPtr);
-                Marshal.FreeHGlobal(responsePtr);
+                Marshal.FreeHGlobal(inBuffer);
+                Marshal.FreeHGlobal(outBuffer);
             }
         }
 
@@ -255,9 +305,44 @@ namespace GTATrainer
             }
         }
 
+        private string GetWin32ErrorMessage(int errorCode)
+        {
+            return errorCode switch
+            {
+                1 => "ERROR_INVALID_FUNCTION",
+                2 => "ERROR_FILE_NOT_FOUND",
+                5 => "ERROR_ACCESS_DENIED",
+                6 => "ERROR_INVALID_HANDLE",
+                87 => "ERROR_INVALID_PARAMETER",
+                995 => "ERROR_OPERATION_ABORTED",
+                1784 => "ERROR_INVALID_OWNER",
+                _ => "Unknown error"
+            };
+        }
+
+        // ==================== DISPOSABLE PATTERN ====================
+
         public void Dispose()
         {
-            _driverHandle?.Dispose();
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!_disposed)
+            {
+                if (disposing)
+                {
+                    _driverHandle?.Dispose();
+                }
+                _disposed = true;
+            }
+        }
+
+        ~GuardLinkDriver()
+        {
+            Dispose(false);
         }
     }
 }

@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace GTATrainer
 {
@@ -28,6 +30,18 @@ namespace GTATrainer
 
         public GTA5Memory()
         {
+            // Verificar se está rodando como administrador
+            if (!IsAdministrator())
+            {
+                throw new Exception("This program must run as Administrator!");
+            }
+
+            // Verificar se o driver está carregado
+            if (!IsDriverLoaded())
+            {
+                throw new Exception("GuardLink driver is not loaded!\nRun in Administrator command prompt:\n  sc start GuardLink");
+            }
+
             _driver = new GuardLinkDriver();
 
             // Encontrar processo do GTA
@@ -48,6 +62,72 @@ namespace GTATrainer
             }
 
             Console.WriteLine($"[+] GTA5.exe base: 0x{_baseAddress.ToInt64():X}");
+        }
+
+        // ==================== ADMIN CHECK ====================
+
+        [DllImport("shell32.dll", SetLastError = true)]
+        static extern bool IsUserAnAdmin();
+
+        private static bool IsAdministrator()
+        {
+            try
+            {
+                return IsUserAnAdmin();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // ==================== DRIVER CHECK ====================
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern SafeFileHandle CreateFile(
+            string lpFileName,
+            uint dwDesiredAccess,
+            uint dwShareMode,
+            IntPtr lpSecurityAttributes,
+            uint dwCreationDisposition,
+            uint dwFlagsAndAttributes,
+            IntPtr hTemplateFile);
+
+        private static bool IsDriverLoaded()
+        {
+            try
+            {
+                Console.WriteLine("[*] Checking if driver device exists...");
+
+                // Tentar abrir o dispositivo
+                SafeFileHandle handle = CreateFile(
+                    @"\\.\Global\GuardLink",
+                    0x80000000, // GENERIC_READ
+                    0,
+                    IntPtr.Zero,
+                    3, // OPEN_EXISTING
+                    0,
+                    IntPtr.Zero);
+
+                if (handle.IsInvalid)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    Console.WriteLine($"[!] Driver device not found (Error {error})");
+                    Console.WriteLine("[!] Make sure the driver is loaded:");
+                    Console.WriteLine("    sc query GuardLink");
+                    Console.WriteLine("    sc start GuardLink");
+                    return false;
+                }
+
+                handle.Dispose();
+                Console.WriteLine("[+] Driver device found and accessible");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] Cannot check driver status: {ex.Message}");
+                return false;
+            }
         }
 
         // ==================== HELPER METHODS ====================
