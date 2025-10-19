@@ -10,7 +10,6 @@ namespace GTATrainer
 
         private const string DEVICE_PATH = @"\\.\Global\GuardLink";
 
-        // IOCTLs CORRETOS - devem corresponder ao driver
         private const uint IOCTL_SET_TARGET = 0x22002000;
         private const uint IOCTL_ENABLE_MONITOR = 0x22002004;
         private const uint IOCTL_READ_MEMORY = 0x22002008;
