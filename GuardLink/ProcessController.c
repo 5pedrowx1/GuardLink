@@ -1,11 +1,12 @@
-﻿#define IOCTL_BASE 0x8000
+﻿// ==================== INCLUDES (CORRECT ORDER) ====================
+#include <ntddk.h>
+#include <ntstatus.h>
+#include <ntstrsafe.h>
+#include <ntimage.h>
+#include "shared_defs.h"
 
-#define CTL_CODE(DeviceType, Function, Method, Access) \
-    ((DeviceType) << 16) | ((Access) << 14) | ((Function) << 2) | (Method)
-
-#define FILE_DEVICE_UNKNOWN 0x00000022
-#define METHOD_BUFFERED 0
-#define FILE_ANY_ACCESS 0
+// ==================== IOCTL DEFINITIONS ====================
+// CTL_CODE is already defined in wdm.h, so we don't redefine it
 
 #define IOCTL_SET_TARGET       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_ENABLE_MONITOR   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -17,8 +18,6 @@
 #define IOCTL_HIDE_PROCESS     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_PROTECT_PROCESS  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x808, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#include "shared_defs.h"
-#include <ntstrsafe.h>
 // ==================== CONFIGURAÇÃO ====================
 
 #define DEVICE_NAME L"\\Device\\{A7C5E891-2D3F-4B5A-9E8C-1F6D3A7B9C4E}"
@@ -34,6 +33,13 @@
 #define PROCESS_QUERY_INFORMATION 0x0400
 #define PROCESS_SUSPEND_RESUME 0x0800
 #define PROCESS_TERMINATE 0x0001
+
+// Memory constants
+#define MEM_IMAGE 0x1000000
+#define MEM_COMMIT 0x1000
+#define PAGE_EXECUTE_READ 0x20
+#define PAGE_EXECUTE_READWRITE 0x40
+#define PAGE_READONLY 0x02
 
 #define DbgLog(fmt, ...) DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[Drv] " fmt, __VA_ARGS__)
 
@@ -102,6 +108,24 @@ typedef struct _DRIVER_CONTEXT {
     PVOID CallbackHandle;
 } DRIVER_CONTEXT, * PDRIVER_CONTEXT;
 
+typedef enum _MEMORY_INFORMATION_CLASS {
+    MemoryBasicInformation,
+    MemoryWorkingSetInformation,
+    MemoryMappedFilenameInformation,
+    MemoryRegionInformation,
+    MemoryWorkingSetExInformation
+} MEMORY_INFORMATION_CLASS;
+
+typedef struct _MEMORY_BASIC_INFORMATION {
+    PVOID BaseAddress;
+    PVOID AllocationBase;
+    ULONG AllocationProtect;
+    SIZE_T RegionSize;
+    ULONG State;
+    ULONG Protect;
+    ULONG Type;
+} MEMORY_BASIC_INFORMATION, * PMEMORY_BASIC_INFORMATION;
+
 PDRIVER_CONTEXT g_Context = NULL;
 
 // ==================== IMPORTS ====================
@@ -113,6 +137,25 @@ NTKERNELAPI PPEB PsGetProcessPeb(IN PEPROCESS Process);
 NTKERNELAPI PCHAR PsGetProcessImageFileName(IN PEPROCESS Process);
 NTKERNELAPI HANDLE PsGetProcessId(IN PEPROCESS Process);
 extern POBJECT_TYPE* PsProcessType;
+
+NTKERNELAPI NTSTATUS NTAPI ZwQueryVirtualMemory(
+    _In_ HANDLE ProcessHandle,
+    _In_opt_ PVOID BaseAddress,
+    _In_ MEMORY_INFORMATION_CLASS MemoryInformationClass,
+    _Out_ PVOID MemoryInformation,
+    _In_ SIZE_T MemoryInformationLength,
+    _Out_opt_ PSIZE_T ReturnLength
+);
+
+NTKERNELAPI NTSTATUS ObOpenObjectByPointer(
+    _In_ PVOID Object,
+    _In_ ULONG HandleAttributes,
+    _In_opt_ PACCESS_STATE PassedAccessState,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_TYPE ObjectType,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _Out_ PHANDLE Handle
+);
 
 // ==================== UTILIDADES ====================
 
@@ -220,7 +263,190 @@ NTSTATUS WriteProcessMemory(
     return status;
 }
 
-// ==================== MODULE ENUMERATION ====================
+// ==================== MODULE ENUMERATION (NEW METHOD) ====================
+
+BOOLEAN IsValidPEHeader(PVOID BaseAddress) {
+    BOOLEAN result = FALSE;
+
+    __try {
+        PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)BaseAddress;
+        ProbeForRead(dosHeader, sizeof(IMAGE_DOS_HEADER), 1);
+
+        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+            return FALSE;
+        }
+
+        if (dosHeader->e_lfanew > 0x1000) {
+            return FALSE;
+        }
+
+        PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((PUCHAR)BaseAddress + dosHeader->e_lfanew);
+        ProbeForRead(ntHeaders, sizeof(IMAGE_NT_HEADERS), 1);
+
+        if (ntHeaders->Signature == IMAGE_NT_SIGNATURE) {
+            result = TRUE;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        result = FALSE;
+    }
+
+    return result;
+}
+
+NTSTATUS GetModuleBaseAlternative(
+    _In_ HANDLE ProcessId,
+    _In_ PWCHAR ModuleName,
+    _Out_ PVOID* BaseAddress,
+    _Out_ PULONG Size)
+{
+    PEPROCESS process;
+    NTSTATUS status;
+    PVOID currentAddress = NULL;
+    HANDLE processHandle = NULL;
+    KAPC_STATE apcState;
+    BOOLEAN found = FALSE;
+
+    *BaseAddress = NULL;
+    *Size = 0;
+
+    DbgLog("GetModuleBaseAlt: Looking for '%ws' in PID %p\n", ModuleName, ProcessId);
+
+    status = PsLookupProcessByProcessId(ProcessId, &process);
+    if (!NT_SUCCESS(status)) {
+        DbgLog("GetModuleBaseAlt: PsLookupProcessByProcessId failed: 0x%08X\n", status);
+        return status;
+    }
+
+    status = ObOpenObjectByPointer(
+        process,
+        OBJ_KERNEL_HANDLE,
+        NULL,
+        GENERIC_READ,
+        *PsProcessType,
+        KernelMode,
+        &processHandle
+    );
+
+    if (!NT_SUCCESS(status)) {
+        DbgLog("GetModuleBaseAlt: ObOpenObjectByPointer failed: 0x%08X\n", status);
+        ObDereferenceObject(process);
+        return status;
+    }
+
+    KeStackAttachProcess((PKPROCESS)process, &apcState);
+
+    DbgLog("GetModuleBaseAlt: Scanning memory regions...\n");
+
+#ifdef _WIN64
+    PVOID maxAddress = (PVOID)0x00007FFFFFFFFFFF;
+#else
+    PVOID maxAddress = (PVOID)0x7FFFFFFF;
+#endif
+
+    int regionCount = 0;
+    int imageCount = 0;
+
+    while ((ULONG_PTR)currentAddress < (ULONG_PTR)maxAddress && regionCount < 10000) {
+        MEMORY_BASIC_INFORMATION mbi;
+        SIZE_T returnLength = 0;
+
+        status = ZwQueryVirtualMemory(
+            processHandle,
+            currentAddress,
+            MemoryBasicInformation,
+            &mbi,
+            sizeof(mbi),
+            &returnLength
+        );
+
+        if (!NT_SUCCESS(status)) {
+            break;
+        }
+
+        regionCount++;
+
+        if (mbi.Type == MEM_IMAGE &&
+            mbi.State == MEM_COMMIT &&
+            (mbi.Protect == PAGE_EXECUTE_READ ||
+                mbi.Protect == PAGE_EXECUTE_READWRITE ||
+                mbi.Protect == PAGE_READONLY)) {
+
+            if (IsValidPEHeader(mbi.BaseAddress)) {
+                imageCount++;
+
+                __try {
+                    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)mbi.BaseAddress;
+                    PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((PUCHAR)mbi.BaseAddress + dosHeader->e_lfanew);
+
+                    ULONG imageSize = ntHeaders->OptionalHeader.SizeOfImage;
+
+                    PIMAGE_DATA_DIRECTORY exportDir = &ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+
+                    if (exportDir->VirtualAddress != 0 && exportDir->Size > 0) {
+                        PIMAGE_EXPORT_DIRECTORY exportTable = (PIMAGE_EXPORT_DIRECTORY)
+                            ((PUCHAR)mbi.BaseAddress + exportDir->VirtualAddress);
+
+                        ProbeForRead(exportTable, sizeof(IMAGE_EXPORT_DIRECTORY), 1);
+
+                        if (exportTable->Name != 0) {
+                            PCHAR moduleName = (PCHAR)((PUCHAR)mbi.BaseAddress + exportTable->Name);
+                            ProbeForRead(moduleName, 260, 1);
+
+                            WCHAR wModuleName[260];
+                            ANSI_STRING ansi;
+                            UNICODE_STRING unicode;
+
+                            RtlInitAnsiString(&ansi, moduleName);
+                            unicode.Buffer = wModuleName;
+                            unicode.MaximumLength = sizeof(wModuleName);
+                            unicode.Length = 0;
+
+                            status = RtlAnsiStringToUnicodeString(&unicode, &ansi, FALSE);
+
+                            if (NT_SUCCESS(status)) {
+                                if (imageCount <= 5) {
+                                    DbgLog("  Image #%d: %ws at %p (Size: 0x%X)\n",
+                                        imageCount, wModuleName, mbi.BaseAddress, imageSize);
+                                }
+
+                                if (_wcsicmp(wModuleName, ModuleName) == 0) {
+                                    *BaseAddress = mbi.BaseAddress;
+                                    *Size = imageSize;
+                                    found = TRUE;
+                                    DbgLog("GetModuleBaseAlt: FOUND at %p!\n", mbi.BaseAddress);
+                                    __leave;
+                                }
+                            }
+                        }
+                    }
+
+                    if (imageCount == 1 && _wcsicmp(ModuleName, L"GTA5.exe") == 0) {
+                        *BaseAddress = mbi.BaseAddress;
+                        *Size = imageSize;
+                        found = TRUE;
+                        DbgLog("GetModuleBaseAlt: Using first image as main module at %p\n", mbi.BaseAddress);
+                        __leave;
+                    }
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
+            }
+        }
+
+        currentAddress = (PVOID)((ULONG_PTR)mbi.BaseAddress + mbi.RegionSize);
+    }
+
+    DbgLog("GetModuleBaseAlt: Scanned %d regions, found %d images\n", regionCount, imageCount);
+
+    KeUnstackDetachProcess(&apcState);
+    ZwClose(processHandle);
+    ObDereferenceObject(process);
+
+    return found ? STATUS_SUCCESS : STATUS_NOT_FOUND;
+}
+
+// ==================== MODULE ENUMERATION (OLD PEB METHOD) ====================
 
 NTSTATUS GetModuleBase(
     _In_ HANDLE ProcessId,
@@ -588,7 +814,7 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
             output->Buffer, (SIZE_T)memOp->Size);
 
         if (NT_SUCCESS(status)) {
-            bytesReturned = (ULONG)(sizeof(MEMORY_OPERATION) + memOp->Size);
+            bytesReturned = (ULONG)(sizeof(MEMORY_OPERATION));
         }
         break;
     }
@@ -608,6 +834,8 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
     case IOCTL_GET_MODULE: {
         if (inputLength < sizeof(MODULE_REQUEST) ||
             outputLength < sizeof(MODULE_RESPONSE)) {
+            DbgLog("IOCTL_GET_MODULE: Buffer too small (in=%lu, out=%lu)\n",
+                inputLength, outputLength);
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
@@ -615,8 +843,22 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
         PMODULE_REQUEST modReq = (PMODULE_REQUEST)inputBuffer;
         PMODULE_RESPONSE modResp = (PMODULE_RESPONSE)outputBuffer;
 
-        status = GetModuleBase(modReq->ProcessId, modReq->ModuleName,
+        DbgLog("IOCTL_GET_MODULE: PID=%p, Module=%ws\n",
+            modReq->ProcessId, modReq->ModuleName);
+
+        // Try new method first
+        status = GetModuleBaseAlternative(modReq->ProcessId, modReq->ModuleName,
             &modResp->BaseAddress, &modResp->Size);
+
+        // If failed, try old PEB method as fallback
+        if (!NT_SUCCESS(status)) {
+            DbgLog("IOCTL_GET_MODULE: Alternative method failed, trying PEB method...\n");
+            status = GetModuleBase(modReq->ProcessId, modReq->ModuleName,
+                &modResp->BaseAddress, &modResp->Size);
+        }
+
+        DbgLog("IOCTL_GET_MODULE: Result=0x%08X, Base=%p, Size=0x%X\n",
+            status, modResp->BaseAddress, modResp->Size);
 
         if (NT_SUCCESS(status)) {
             bytesReturned = sizeof(MODULE_RESPONSE);
@@ -862,9 +1104,7 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
     status = RegisterProcessProtection();
     if (!NT_SUCCESS(status)) {
         DbgLog("RegisterProcessProtection failed: 0x%08X (non-critical)\n", status);
-        // Não é crítico, continuar
     }
-
 
     DbgLog("========================================\n");
     DbgLog("[+] Driver loaded successfully!\n");

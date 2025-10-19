@@ -10,15 +10,19 @@ namespace GTATrainer
 
         private const string DEVICE_PATH = @"\\.\Global\GuardLink";
 
-        private const uint IOCTL_SET_TARGET = 0x22002000;
-        private const uint IOCTL_ENABLE_MONITOR = 0x22002004;
-        private const uint IOCTL_READ_MEMORY = 0x22002008;
-        private const uint IOCTL_WRITE_MEMORY = 0x2200200C;
-        private const uint IOCTL_GET_MODULE = 0x22002010;
-        private const uint IOCTL_INSTALL_HOOK = 0x22002014;
-        private const uint IOCTL_REMOVE_HOOK = 0x22002018;
-        private const uint IOCTL_HIDE_PROCESS = 0x2200201C;
-        private const uint IOCTL_PROTECT_PROCESS = 0x22002020;
+        // ⚠️ IOCTL codes MUST match the driver's CTL_CODE macro
+        // Formula: ((DeviceType << 16) | (Access << 14) | (Function << 2) | Method)
+        // FILE_DEVICE_UNKNOWN = 0x22, METHOD_BUFFERED = 0, FILE_ANY_ACCESS = 0
+
+        private const uint IOCTL_SET_TARGET = 0x00222000; // 0x800 << 2
+        private const uint IOCTL_ENABLE_MONITOR = 0x00222004; // 0x801 << 2
+        private const uint IOCTL_READ_MEMORY = 0x00222008; // 0x802 << 2
+        private const uint IOCTL_WRITE_MEMORY = 0x0022200C; // 0x803 << 2
+        private const uint IOCTL_GET_MODULE = 0x00222010; // 0x804 << 2
+        private const uint IOCTL_INSTALL_HOOK = 0x00222014; // 0x805 << 2
+        private const uint IOCTL_REMOVE_HOOK = 0x00222018; // 0x806 << 2
+        private const uint IOCTL_HIDE_PROCESS = 0x0022201C; // 0x807 << 2
+        private const uint IOCTL_PROTECT_PROCESS = 0x00222020; // 0x808 << 2
 
         // ==================== STRUCTURES ====================
 
@@ -70,9 +74,6 @@ namespace GTATrainer
             out uint lpBytesReturned,
             IntPtr lpOverlapped);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool CloseHandle(IntPtr hObject);
-
         // ==================== FIELDS ====================
 
         private SafeFileHandle _driverHandle;
@@ -111,34 +112,30 @@ namespace GTATrainer
             if (size <= 0 || size > 4096)
                 throw new ArgumentException("Size must be between 1 and 4096 bytes");
 
-            // Calcular tamanho total da estrutura
             int structSize = Marshal.SizeOf<MEMORY_OPERATION>();
-            int totalSize = structSize + size - 4096; // Subtrair o tamanho do buffer padrão
 
-            IntPtr inBuffer = Marshal.AllocHGlobal(totalSize);
-            IntPtr outBuffer = Marshal.AllocHGlobal(totalSize);
+            IntPtr inBuffer = Marshal.AllocHGlobal(structSize);
+            IntPtr outBuffer = Marshal.AllocHGlobal(structSize);
 
             try
             {
-                // Preparar estrutura de input
                 var request = new MEMORY_OPERATION
                 {
                     ProcessId = new IntPtr(processId),
                     Address = address,
                     Size = (ulong)size,
-                    Buffer = new byte[4096] // Buffer temporário
+                    Buffer = new byte[4096]
                 };
 
                 Marshal.StructureToPtr(request, inBuffer, false);
 
-                // Chamar driver
                 bool success = DeviceIoControl(
                     _driverHandle,
                     IOCTL_READ_MEMORY,
                     inBuffer,
-                    (uint)totalSize,
+                    (uint)structSize,
                     outBuffer,
-                    (uint)totalSize,
+                    (uint)structSize,
                     out uint bytesReturned,
                     IntPtr.Zero);
 
@@ -148,10 +145,8 @@ namespace GTATrainer
                     throw new Exception($"ReadMemory failed: Error {error} (0x{error:X}) - {GetWin32ErrorMessage(error)}");
                 }
 
-                // Extrair dados do output
                 var response = Marshal.PtrToStructure<MEMORY_OPERATION>(outBuffer);
 
-                // Copiar apenas os bytes necessários
                 byte[] result = new byte[size];
                 Array.Copy(response.Buffer, result, size);
 
@@ -170,9 +165,7 @@ namespace GTATrainer
                 throw new ArgumentException("Data must be between 1 and 4096 bytes");
 
             int structSize = Marshal.SizeOf<MEMORY_OPERATION>();
-            int totalSize = structSize + data.Length - 4096;
-
-            IntPtr inBuffer = Marshal.AllocHGlobal(totalSize);
+            IntPtr inBuffer = Marshal.AllocHGlobal(structSize);
 
             try
             {
@@ -184,16 +177,14 @@ namespace GTATrainer
                     Buffer = new byte[4096]
                 };
 
-                // Copiar dados para o buffer
                 Array.Copy(data, request.Buffer, data.Length);
-
                 Marshal.StructureToPtr(request, inBuffer, false);
 
                 bool success = DeviceIoControl(
                     _driverHandle,
                     IOCTL_WRITE_MEMORY,
                     inBuffer,
-                    (uint)totalSize,
+                    (uint)structSize,
                     IntPtr.Zero,
                     0,
                     out _,
@@ -217,14 +208,13 @@ namespace GTATrainer
         public IntPtr GetModuleBase(int processId, string moduleName)
         {
             Console.WriteLine($"[*] GetModuleBase: PID={processId}, Module={moduleName}");
+            Console.WriteLine($"[*] Using IOCTL: 0x{IOCTL_GET_MODULE:X8}");
 
             var request = new MODULE_REQUEST
             {
                 ProcessId = new IntPtr(processId),
                 ModuleName = moduleName
             };
-
-            var response = new MODULE_RESPONSE();
 
             int inSize = Marshal.SizeOf<MODULE_REQUEST>();
             int outSize = Marshal.SizeOf<MODULE_RESPONSE>();
@@ -251,10 +241,11 @@ namespace GTATrainer
                     int error = Marshal.GetLastWin32Error();
                     string errorMsg = GetWin32ErrorMessage(error);
                     Console.WriteLine($"[-] GetModuleBase failed: Error {error} (0x{error:X}) - {errorMsg}");
+                    Console.WriteLine($"[-] Bytes returned: {bytesReturned}");
                     return IntPtr.Zero;
                 }
 
-                response = Marshal.PtrToStructure<MODULE_RESPONSE>(outBuffer);
+                var response = Marshal.PtrToStructure<MODULE_RESPONSE>(outBuffer);
                 Console.WriteLine($"[+] Module base: 0x{response.BaseAddress.ToInt64():X16}, Size: 0x{response.Size:X}");
 
                 return response.BaseAddress;
@@ -308,14 +299,14 @@ namespace GTATrainer
         {
             return errorCode switch
             {
-                1 => "ERROR_INVALID_FUNCTION",
-                2 => "ERROR_FILE_NOT_FOUND",
-                5 => "ERROR_ACCESS_DENIED",
-                6 => "ERROR_INVALID_HANDLE",
-                87 => "ERROR_INVALID_PARAMETER",
-                995 => "ERROR_OPERATION_ABORTED",
-                1784 => "ERROR_INVALID_OWNER",
-                _ => "Unknown error"
+                1 => "ERROR_INVALID_FUNCTION - The IOCTL code doesn't match",
+                2 => "ERROR_FILE_NOT_FOUND - Driver device not found",
+                5 => "ERROR_ACCESS_DENIED - Insufficient privileges",
+                6 => "ERROR_INVALID_HANDLE - Invalid driver handle",
+                87 => "ERROR_INVALID_PARAMETER - Invalid buffer or parameters",
+                995 => "ERROR_OPERATION_ABORTED - Operation canceled",
+                1784 => "ERROR_INVALID_OWNER - Security context issue",
+                _ => $"Unknown error code: {errorCode}"
             };
         }
 

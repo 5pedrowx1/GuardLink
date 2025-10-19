@@ -9,6 +9,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "UserModeControl", "UserMode
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GTA5Trainer", "GTA5Trainer\GTA5Trainer.csproj", "{A3D62C7F-8D1F-41E1-9B80-2AA86721D074}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Debug", "Debug\Debug.csproj", "{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -61,6 +63,18 @@ Global
 		{A3D62C7F-8D1F-41E1-9B80-2AA86721D074}.Release|ARM64.Build.0 = Release|Any CPU
 		{A3D62C7F-8D1F-41E1-9B80-2AA86721D074}.Release|x64.ActiveCfg = Release|Any CPU
 		{A3D62C7F-8D1F-41E1-9B80-2AA86721D074}.Release|x64.Build.0 = Release|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Debug|ARM64.ActiveCfg = Debug|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Debug|ARM64.Build.0 = Debug|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Debug|x64.Build.0 = Debug|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Release|ARM64.ActiveCfg = Release|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Release|ARM64.Build.0 = Release|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Release|x64.ActiveCfg = Release|Any CPU
+		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Release|x64.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
