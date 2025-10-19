@@ -4,490 +4,8 @@
 #include <stdlib.h>
 #include <string>
 #include <vector>
-#include <ctime>
 #include <TlHelp32.h>
 #include "shared_defs.h"
-
-// ==================== UTILITY FUNCTIONS ====================
-
-static ULONG GetWindowsTimestamp() {
-    FILETIME ft;
-    ULARGE_INTEGER uli;
-
-    GetSystemTimeAsFileTime(&ft);
-    uli.LowPart = ft.dwLowDateTime;
-    uli.HighPart = ft.dwHighDateTime;
-
-    return (ULONG)(uli.QuadPart / 10000000ULL);
-}
-
-static ULONG CalculateHash(const WCHAR* str) {
-    if (!str) return 0;
-
-    ULONG hash = 0x811C9DC5;
-    while (*str) {
-        WCHAR lower = (*str >= L'A' && *str <= L'Z') ? (*str + 32) : *str;
-        hash ^= (UCHAR)lower;
-        hash *= 0x01000193;
-        str++;
-    }
-    return hash;
-}
-
-static ULONG CalculateChecksum(UCHAR* data, ULONG size) {
-    ULONG hash = 0x811C9DC5;
-    for (ULONG i = 0; i < size; i++) {
-        hash ^= data[i];
-        hash *= 0x01000193;
-    }
-    return hash;
-}
-
-static void XorEncryptDecrypt(UCHAR* data, ULONG dataSize, UCHAR* key, ULONG keySize) {
-    if (!data || !key || keySize == 0) return;
-
-    for (ULONG i = 0; i < dataSize; i++) {
-        data[i] ^= key[i % keySize];
-    }
-}
-
-static void GenerateRandomDeviceName(WCHAR* buffer, size_t bufferSize, ULONG seed) {
-    const WCHAR* chars = L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    ULONG charCount = (ULONG)wcslen(chars);
-
-    LARGE_INTEGER time;
-    QueryPerformanceCounter(&time);
-    seed ^= (ULONG)(time.QuadPart & 0xFFFFFFFF);
-
-    wcscpy_s(buffer, bufferSize, L"");
-
-    for (ULONG i = 0; i < 12; i++) {
-        seed = (seed * 1103515245 + 12345);
-        WCHAR ch[2] = { chars[(seed >> 16) % charCount], 0 };
-        wcscat_s(buffer, bufferSize, ch);
-    }
-}
-
-// ==================== DRIVER CLASS ====================
-
-class Driver {
-private:
-    HANDLE hDriver;
-    DYNAMIC_IOCTL_MAP ioctlMap;
-    bool authenticated;
-    ULONG sequenceNumber;
-
-    enum CommandIndex {
-        CMD_SET_TARGET = 0,
-        CMD_ENABLE_MONITOR = 1,
-        CMD_READ_MEMORY = 2,
-        CMD_WRITE_MEMORY = 3,
-        CMD_GET_MODULE = 4,
-        CMD_INSTALL_HOOK = 5,
-        CMD_REMOVE_HOOK = 6,
-        CMD_HIDE_PROCESS = 7,
-        CMD_PROTECT_PROCESS = 8
-    };
-
-    bool SendCommand(ULONG commandIndex, const void* data, SIZE_T dataSize,
-        void* outputBuffer = nullptr, SIZE_T outputSize = 0,
-        DWORD* bytesReturned = nullptr) {
-
-        if (!authenticated) {
-            printf("[-] Not authenticated\n");
-            return false;
-        }
-
-        printf("\n[DEBUG] SendCommand START\n");
-        printf("[DEBUG] Command Index: %lu\n", commandIndex);
-        printf("[DEBUG] Data Size: %llu\n", (ULONGLONG)dataSize);
-
-        // Calcular tamanho total
-        SIZE_T totalSize = sizeof(OBFUSCATED_REQUEST) + dataSize;
-        std::vector<BYTE> buffer(totalSize);
-
-        POBFUSCATED_REQUEST request = (POBFUSCATED_REQUEST)buffer.data();
-        ZeroMemory(request, totalSize);
-
-        // Magic number baseado no minuto atual
-        ULONG currentTimestamp = GetWindowsTimestamp(); 
-        ULONG currentMinute = currentTimestamp / 60;
-        request->Magic = currentMinute ^ 0xDEADBEEF;
-
-        printf("[DEBUG] Current Minute: %lu\n", currentMinute);
-        printf("[DEBUG] Magic: 0x%08X\n", request->Magic);
-
-        // Command hash da tabela sincronizada
-        request->CommandHash = ioctlMap.CommandTable[commandIndex];
-        printf("[DEBUG] Command Hash: 0x%08X\n", request->CommandHash);
-
-        // Copiar payload
-        request->PayloadSize = (ULONG)dataSize;
-        if (data && dataSize > 0) {
-            memcpy(request->EncryptedPayload, data, dataSize);
-            printf("[DEBUG] Payload copied: %llu bytes\n", (ULONGLONG)dataSize);
-        }
-
-        // Calcular checksum ANTES de criptografar
-        request->Checksum = CalculateChecksum(request->EncryptedPayload, request->PayloadSize);
-        printf("[DEBUG] Checksum: 0x%08X\n", request->Checksum);
-
-        // Criptografar payload
-        XorEncryptDecrypt(request->EncryptedPayload, request->PayloadSize,
-            ioctlMap.XorKey, ENCRYPTION_KEY_SIZE);
-        printf("[DEBUG] Payload encrypted\n");
-
-        // Padding aleatório
-        for (int i = 0; i < 4; i++) {
-            request->Padding[i] = rand();
-        }
-
-        // Preparar buffers
-        DWORD dummy;
-        if (!bytesReturned) bytesReturned = &dummy;
-
-        *bytesReturned = 0;
-
-        DWORD genericIoctl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS);
-        printf("[DEBUG] IOCTL Code: 0x%08X\n", genericIoctl);
-
-        // Chamar DeviceIoControl
-        printf("[DEBUG] Calling DeviceIoControl...\n");
-
-        BOOL result = DeviceIoControl(
-            hDriver,
-            genericIoctl,
-            request, (DWORD)totalSize,
-            outputBuffer, (DWORD)outputSize,
-            bytesReturned,
-            nullptr
-        );
-
-        if (!result) {
-            DWORD error = GetLastError();
-            printf("[-] DeviceIoControl failed: %lu (0x%08X)\n", error, error);
-
-            // Diagnóstico adicional
-            switch (error) {
-            case ERROR_ACCESS_DENIED:
-                printf("    -> ACCESS DENIED: Check driver is loaded and has permissions\n");
-                break;
-            case ERROR_INVALID_PARAMETER:
-                printf("    -> INVALID PARAMETER: Check IOCTL code and buffer sizes\n");
-                break;
-            case ERROR_NOT_SUPPORTED:
-                printf("    -> NOT SUPPORTED: IOCTL not recognized by driver\n");
-                break;
-            case ERROR_GEN_FAILURE:
-                printf("    -> GENERAL FAILURE: Driver returned error status\n");
-                break;
-            default:
-                printf("    -> See https://docs.microsoft.com/windows/win32/debug/system-error-codes\n");
-                break;
-            }
-
-            printf("[DEBUG] SendCommand END (FAILED)\n\n");
-            return false;
-        }
-
-        printf("[+] DeviceIoControl succeeded\n");
-        printf("[+] Bytes returned: %lu\n", *bytesReturned);
-        printf("[DEBUG] SendCommand END (SUCCESS)\n\n");
-
-        return true;
-    }
-
-public:
-    Driver() : hDriver(INVALID_HANDLE_VALUE), authenticated(false), sequenceNumber(0) {
-        ZeroMemory(&ioctlMap, sizeof(ioctlMap));
-        srand((unsigned int)time(nullptr));
-    }
-
-    ~Driver() {
-        Disconnect();
-    }
-
-    bool Connect(const WCHAR* deviceName = nullptr) {
-        WCHAR finalName[256];
-
-        if (deviceName) {
-            wcscpy_s(finalName, deviceName);
-        }
-        else {
-            HKEY hKey;
-            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                L"System\\CurrentControlSet\\Services\\GuardLink\\Parameters",
-                0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-
-                WCHAR regValue[256];
-                DWORD size = sizeof(regValue);
-
-                if (RegQueryValueExW(hKey, L"DeviceName", NULL, NULL,
-                    (LPBYTE)regValue, &size) == ERROR_SUCCESS) {
-                    swprintf_s(finalName, L"\\\\.\\%s", regValue);
-                    printf("[+] Device name read from registry: %ws\n", regValue);
-                }
-                else {
-                    printf("[-] Failed to read device name from registry\n");
-                    RegCloseKey(hKey);
-                    return false;
-                }
-
-                RegCloseKey(hKey);
-            }
-            else {
-                printf("[-] Failed to open registry key\n");
-                printf("[!] Make sure driver is loaded\n");
-                return false;
-            }
-        }
-
-        printf("[*] Connecting to device: %ws\n", finalName);
-
-        hDriver = CreateFileW(
-            finalName,
-            GENERIC_READ | GENERIC_WRITE,
-            0,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr
-        );
-
-        if (hDriver == INVALID_HANDLE_VALUE) {
-            printf("[-] Failed to open device: %lu\n", GetLastError());
-            return false;
-        }
-
-        printf("[+] Device opened successfully\n");
-        return true;
-    }
-
-    void Disconnect() {
-        if (hDriver != INVALID_HANDLE_VALUE) {
-            CloseHandle(hDriver);
-            hDriver = INVALID_HANDLE_VALUE;
-        }
-        authenticated = false;
-    }
-
-    bool IsConnected() const {
-        return hDriver != INVALID_HANDLE_VALUE && authenticated;
-    }
-
-    bool PerformHandshake() {
-        if (hDriver == INVALID_HANDLE_VALUE) return false;
-
-        HANDSHAKE_REQUEST request = { 0 };
-        HANDSHAKE_RESPONSE response = { 0 };
-
-        request.ClientVersion = 1;
-        request.ClientTimestamp = GetWindowsTimestamp();
-
-        // Gera nonce
-        for (int i = 0; i < 32; i++) {
-            request.ClientNonce[i] = (BYTE)(rand() % 256);
-        }
-
-        DWORD bytesReturned = 0;
-        DWORD handshakeIoctl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS);
-
-        printf("[*] Performing handshake...\n");
-        printf("[*] Client timestamp: %lu\n", request.ClientTimestamp);
-
-        BOOL result = DeviceIoControl(
-            hDriver,
-            handshakeIoctl,
-            &request, sizeof(request),
-            &response, sizeof(response),
-            &bytesReturned,
-            nullptr
-        );
-
-        if (!result) {
-            printf("[-] Handshake DeviceIoControl failed: %lu\n", GetLastError());
-            return false;
-        }
-
-        if (bytesReturned != sizeof(response)) {
-            printf("[-] Handshake failed: received %lu bytes (expected %zu)\n",
-                bytesReturned, sizeof(response));
-            return false;
-        }
-
-        if (response.ServerVersion != 1) {
-            printf("[-] Version mismatch\n");
-            return false;
-        }
-
-        // Copia mapa de IOCTLs
-        memcpy(&ioctlMap, &response.IoctlMap, sizeof(ioctlMap));
-        authenticated = true;
-
-        printf("[+] Handshake successful\n");
-        printf("[+] Server timestamp: %lu\n", response.ServerTimestamp);
-        printf("[+] Random seed: 0x%08X\n", ioctlMap.RandomSeed);
-        printf("[+] Command table synchronized\n");
-
-        return true;
-    }
-
-    // ==================== HIGH-LEVEL API ====================
-
-    bool SetTargetProcess(const WCHAR* processName) {
-        printf("[*] Setting target process: %ws\n", processName);
-
-        size_t len = wcslen(processName) + 1;
-        return SendCommand(CMD_SET_TARGET, processName, len * sizeof(WCHAR));
-    }
-
-    bool EnableMonitoring(bool enable) {
-        printf("[*] %s monitoring\n", enable ? "Enabling" : "Disabling");
-
-        BOOLEAN flag = enable ? TRUE : FALSE;
-        return SendCommand(CMD_ENABLE_MONITOR, &flag, sizeof(flag));
-    }
-
-    bool ReadMemory(DWORD processId, PVOID address, void* buffer, SIZE_T size) {
-        printf("[*] Reading memory: PID=%lu, Addr=%p, Size=%llu\n",
-            processId, address, (ULONGLONG)size);
-
-        SIZE_T requestSize = sizeof(MEMORY_OPERATION) + size;
-        std::vector<BYTE> requestBuffer(requestSize);
-        std::vector<BYTE> responseBuffer(requestSize);
-
-        PMEMORY_OPERATION request = (PMEMORY_OPERATION)requestBuffer.data();
-        request->ProcessId = (HANDLE)(ULONG_PTR)processId;
-        request->Address = address;
-        request->Size = size;
-
-        DWORD bytesReturned = 0;
-        if (!SendCommand(CMD_READ_MEMORY, request, requestSize,
-            responseBuffer.data(), (SIZE_T)requestSize, &bytesReturned)) {
-            return false;
-        }
-
-        PMEMORY_OPERATION response = (PMEMORY_OPERATION)responseBuffer.data();
-        memcpy(buffer, response->Buffer, size);
-
-        printf("[+] Memory read successfully\n");
-        return true;
-    }
-
-    bool WriteMemory(DWORD processId, PVOID address, const void* buffer, SIZE_T size) {
-        printf("[*] Writing memory: PID=%lu, Addr=%p, Size=%llu\n",
-            processId, address, (ULONGLONG)size);
-
-        SIZE_T requestSize = sizeof(MEMORY_OPERATION) + size;
-        std::vector<BYTE> requestBuffer(requestSize);
-
-        PMEMORY_OPERATION request = (PMEMORY_OPERATION)requestBuffer.data();
-        request->ProcessId = (HANDLE)(ULONG_PTR)processId;
-        request->Address = address;
-        request->Size = size;
-        memcpy(request->Buffer, buffer, size);
-
-        if (!SendCommand(CMD_WRITE_MEMORY, request, requestSize)) {
-            return false;
-        }
-
-        printf("[+] Memory written successfully\n");
-        return true;
-    }
-
-    bool GetModuleBase(DWORD processId, const WCHAR* moduleName,
-        PVOID* baseAddress, ULONG* moduleSize) {
-        printf("[*] Getting module base: %ws\n", moduleName);
-
-        MODULE_REQUEST request = { 0 };
-        MODULE_RESPONSE response = { 0 };
-
-        request.ProcessId = (HANDLE)(ULONG_PTR)processId;
-        wcscpy_s(request.ModuleName, moduleName);
-
-        DWORD bytesReturned = 0;
-        if (!SendCommand(CMD_GET_MODULE, &request, sizeof(request),
-            &response, sizeof(response), &bytesReturned)) {
-            return false;
-        }
-
-        *baseAddress = response.BaseAddress;
-        *moduleSize = response.Size;
-
-        printf("[+] Module found: Base=%p, Size=0x%X\n", *baseAddress, *moduleSize);
-        return true;
-    }
-
-    bool InstallHook(DWORD processId, PVOID targetAddress,
-        const BYTE* hookCode, ULONG hookSize) {
-        printf("[*] Installing hook at %p (size=%lu)\n", targetAddress, hookSize);
-
-        if (hookSize > 16 || hookSize < 5) {
-            printf("[-] Invalid hook size\n");
-            return false;
-        }
-
-        HOOK_REQUEST request = { 0 };
-        request.ProcessId = (HANDLE)(ULONG_PTR)processId;
-        request.TargetAddress = targetAddress;
-        request.HookSize = hookSize;
-        memcpy(request.HookCode, hookCode, hookSize);
-
-        if (!SendCommand(CMD_INSTALL_HOOK, &request, sizeof(request))) {
-            return false;
-        }
-
-        printf("[+] Hook installed successfully\n");
-        return true;
-    }
-
-    bool RemoveHook(DWORD processId, PVOID targetAddress) {
-        printf("[*] Removing hook from %p\n", targetAddress);
-
-        struct {
-            HANDLE ProcessId;
-            PVOID Address;
-        } request;
-
-        request.ProcessId = (HANDLE)(ULONG_PTR)processId;
-        request.Address = targetAddress;
-
-        if (!SendCommand(CMD_REMOVE_HOOK, &request, sizeof(request))) {
-            return false;
-        }
-
-        printf("[+] Hook removed successfully\n");
-        return true;
-    }
-
-    bool HideProcess(DWORD processId) {
-        printf("[*] Hiding process: PID=%lu\n", processId);
-
-        HANDLE pid = (HANDLE)(ULONG_PTR)processId;
-        if (!SendCommand(CMD_HIDE_PROCESS, &pid, sizeof(pid))) {
-            return false;
-        }
-
-        printf("[+] Process hidden from system\n");
-        return true;
-    }
-
-    bool ProtectProcess(DWORD processId, const WCHAR* processName) {
-        printf("[*] Protecting process: %ws (PID=%lu)\n", processName, processId);
-
-        PROCESS_REQUEST request = { 0 };
-        request.ProcessId = (HANDLE)(ULONG_PTR)processId;
-        wcscpy_s(request.ProcessName, processName);
-        request.Enable = TRUE;
-
-        if (!SendCommand(CMD_PROTECT_PROCESS, &request, sizeof(request))) {
-            return false;
-        }
-
-        printf("[+] Process protection enabled\n");
-        return true;
-    }
-};
 
 // ==================== UTILITY FUNCTIONS ====================
 
@@ -513,133 +31,481 @@ DWORD GetProcessIdByName(const WCHAR* processName) {
 
 void PrintMemoryHex(const void* data, SIZE_T size) {
     const BYTE* bytes = (const BYTE*)data;
+    printf("\n");
     for (SIZE_T i = 0; i < size; i++) {
+        if (i % 16 == 0) {
+            if (i > 0) printf("\n");
+            printf("  %04zX: ", i);
+        }
         printf("%02X ", bytes[i]);
-        if ((i + 1) % 16 == 0) printf("\n");
     }
-    if (size % 16 != 0) printf("\n");
+    printf("\n\n");
 }
+
+void ClearScreen() {
+    system("cls");
+}
+
+// ==================== DRIVER CLASS ====================
+
+class DriverInterface {
+private:
+    HANDLE hDriver;
+
+    bool SendIOCTL(DWORD ioctl, const void* input, SIZE_T inputSize,
+        void* output = nullptr, SIZE_T outputSize = 0,
+        DWORD* bytesReturned = nullptr) {
+
+        if (hDriver == INVALID_HANDLE_VALUE) {
+            printf("[-] Driver not connected\n");
+            return false;
+        }
+
+        DWORD dummy = 0;
+        if (!bytesReturned) bytesReturned = &dummy;
+
+        BOOL result = DeviceIoControl(
+            hDriver,
+            ioctl,
+            (LPVOID)input, (DWORD)inputSize,
+            output, (DWORD)outputSize,
+            bytesReturned,
+            nullptr
+        );
+
+        if (!result) {
+            DWORD error = GetLastError();
+            printf("[-] DeviceIoControl failed: %lu (0x%08X)\n", error, error);
+
+            switch (error) {
+            case ERROR_ACCESS_DENIED:
+                printf("    -> Access denied - check permissions\n");
+                break;
+            case ERROR_INVALID_PARAMETER:
+                printf("    -> Invalid parameter\n");
+                break;
+            case ERROR_NOT_SUPPORTED:
+                printf("    -> Operation not supported\n");
+                break;
+            case ERROR_GEN_FAILURE:
+                printf("    -> General failure\n");
+                break;
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+public:
+    DriverInterface() : hDriver(INVALID_HANDLE_VALUE) {}
+
+    ~DriverInterface() {
+        Disconnect();
+    }
+
+    bool Connect(const WCHAR* devicePath = L"\\\\.\\Global\\GuardLink") {
+        printf("[*] Connecting to device: %ws\n", devicePath);
+
+        hDriver = CreateFileW(
+            devicePath,
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr
+        );
+
+        if (hDriver == INVALID_HANDLE_VALUE) {
+            DWORD error = GetLastError();
+            printf("[-] Failed to open device: %lu (0x%08X)\n", error, error);
+
+            if (error == ERROR_FILE_NOT_FOUND) {
+                printf("    -> Device not found - is the driver loaded?\n");
+            }
+            else if (error == ERROR_ACCESS_DENIED) {
+                printf("    -> Access denied - run as Administrator\n");
+            }
+            return false;
+        }
+
+        printf("[+] Connected to driver successfully\n");
+        return true;
+    }
+
+    void Disconnect() {
+        if (hDriver != INVALID_HANDLE_VALUE) {
+            CloseHandle(hDriver);
+            hDriver = INVALID_HANDLE_VALUE;
+            printf("[*] Disconnected from driver\n");
+        }
+    }
+
+    bool IsConnected() const {
+        return hDriver != INVALID_HANDLE_VALUE;
+    }
+
+    // ==================== DRIVER OPERATIONS ====================
+
+    bool SetTargetProcess(const WCHAR* processName) {
+        printf("\n[*] Setting target process: %ws\n", processName);
+
+        SIZE_T len = (wcslen(processName) + 1) * sizeof(WCHAR);
+        bool result = SendIOCTL(IOCTL_SET_TARGET, processName, len);
+
+        if (result) {
+            printf("[+] Target process set successfully\n");
+        }
+        return result;
+    }
+
+    bool EnableMonitoring(bool enable) {
+        printf("\n[*] %s monitoring\n", enable ? "Enabling" : "Disabling");
+
+        BOOLEAN flag = enable ? TRUE : FALSE;
+        bool result = SendIOCTL(IOCTL_ENABLE_MONITOR, &flag, sizeof(flag));
+
+        if (result) {
+            printf("[+] Monitoring %s\n", enable ? "enabled" : "disabled");
+        }
+        return result;
+    }
+
+    bool ReadMemory(DWORD processId, PVOID address, void* buffer, SIZE_T size) {
+        printf("\n[*] Reading memory\n");
+        printf("    PID:     %lu\n", processId);
+        printf("    Address: 0x%p\n", address);
+        printf("    Size:    %llu bytes\n", (ULONGLONG)size);
+
+        SIZE_T requestSize = sizeof(MEMORY_OPERATION) + size;
+        std::vector<BYTE> requestBuf(requestSize);
+        std::vector<BYTE> responseBuf(requestSize);
+
+        PMEMORY_OPERATION req = (PMEMORY_OPERATION)requestBuf.data();
+        req->ProcessId = (HANDLE)(ULONG_PTR)processId;
+        req->Address = address;
+        req->Size = size;
+
+        DWORD bytesReturned = 0;
+        bool result = SendIOCTL(IOCTL_READ_MEMORY,
+            req, requestSize,
+            responseBuf.data(), requestSize,
+            &bytesReturned);
+
+        if (result && bytesReturned >= sizeof(MEMORY_OPERATION)) {
+            PMEMORY_OPERATION resp = (PMEMORY_OPERATION)responseBuf.data();
+            memcpy(buffer, resp->Buffer, size);
+            printf("[+] Memory read successfully (%lu bytes returned)\n", bytesReturned);
+            return true;
+        }
+
+        return false;
+    }
+
+    bool WriteMemory(DWORD processId, PVOID address, const void* buffer, SIZE_T size) {
+        printf("\n[*] Writing memory\n");
+        printf("    PID:     %lu\n", processId);
+        printf("    Address: 0x%p\n", address);
+        printf("    Size:    %llu bytes\n", (ULONGLONG)size);
+
+        SIZE_T requestSize = sizeof(MEMORY_OPERATION) + size;
+        std::vector<BYTE> requestBuf(requestSize);
+
+        PMEMORY_OPERATION req = (PMEMORY_OPERATION)requestBuf.data();
+        req->ProcessId = (HANDLE)(ULONG_PTR)processId;
+        req->Address = address;
+        req->Size = size;
+        memcpy(req->Buffer, buffer, size);
+
+        bool result = SendIOCTL(IOCTL_WRITE_MEMORY, req, requestSize);
+
+        if (result) {
+            printf("[+] Memory written successfully\n");
+        }
+        return result;
+    }
+
+    bool GetModuleBase(DWORD processId, const WCHAR* moduleName,
+        PVOID* baseAddress, ULONG* moduleSize) {
+        printf("\n[*] Getting module base\n");
+        printf("    PID:    %lu\n", processId);
+        printf("    Module: %ws\n", moduleName);
+
+        MODULE_REQUEST req = { 0 };
+        MODULE_RESPONSE resp = { 0 };
+
+        req.ProcessId = (HANDLE)(ULONG_PTR)processId;
+        wcscpy_s(req.ModuleName, moduleName);
+
+        DWORD bytesReturned = 0;
+        bool result = SendIOCTL(IOCTL_GET_MODULE,
+            &req, sizeof(req),
+            &resp, sizeof(resp),
+            &bytesReturned);
+
+        if (result && bytesReturned == sizeof(MODULE_RESPONSE)) {
+            *baseAddress = resp.BaseAddress;
+            *moduleSize = resp.Size;
+            printf("[+] Module found\n");
+            printf("    Base: 0x%p\n", *baseAddress);
+            printf("    Size: 0x%X (%lu bytes)\n", *moduleSize, *moduleSize);
+            return true;
+        }
+
+        return false;
+    }
+
+    bool InstallHook(DWORD processId, PVOID targetAddress,
+        const BYTE* hookCode, ULONG hookSize) {
+        printf("\n[*] Installing hook\n");
+        printf("    PID:     %lu\n", processId);
+        printf("    Address: 0x%p\n", targetAddress);
+        printf("    Size:    %lu bytes\n", hookSize);
+
+        if (hookSize > 16 || hookSize < 5) {
+            printf("[-] Invalid hook size (must be 5-16 bytes)\n");
+            return false;
+        }
+
+        HOOK_REQUEST req = { 0 };
+        req.ProcessId = (HANDLE)(ULONG_PTR)processId;
+        req.TargetAddress = targetAddress;
+        req.HookSize = hookSize;
+        memcpy(req.HookCode, hookCode, hookSize);
+
+        printf("    Hook bytes: ");
+        for (ULONG i = 0; i < hookSize; i++) {
+            printf("%02X ", hookCode[i]);
+        }
+        printf("\n");
+
+        bool result = SendIOCTL(IOCTL_INSTALL_HOOK, &req, sizeof(req));
+
+        if (result) {
+            printf("[+] Hook installed successfully\n");
+        }
+        return result;
+    }
+
+    bool RemoveHook(DWORD processId, PVOID targetAddress) {
+        printf("\n[*] Removing hook\n");
+        printf("    PID:     %lu\n", processId);
+        printf("    Address: 0x%p\n", targetAddress);
+
+        HOOK_REQUEST req = { 0 };
+        req.ProcessId = (HANDLE)(ULONG_PTR)processId;
+        req.TargetAddress = targetAddress;
+
+        bool result = SendIOCTL(IOCTL_REMOVE_HOOK, &req, sizeof(req));
+
+        if (result) {
+            printf("[+] Hook removed successfully\n");
+        }
+        return result;
+    }
+
+    bool HideProcess(DWORD processId) {
+        printf("\n[*] Hiding process from EPROCESS list\n");
+        printf("    PID: %lu\n", processId);
+        printf("[!] Warning: This uses DKOM (Direct Kernel Object Manipulation)\n");
+
+        HANDLE pid = (HANDLE)(ULONG_PTR)processId;
+        bool result = SendIOCTL(IOCTL_HIDE_PROCESS, &pid, sizeof(pid));
+
+        if (result) {
+            printf("[+] Process hidden from system\n");
+            printf("    -> Will not appear in Task Manager\n");
+            printf("    -> Process will continue running\n");
+        }
+        return result;
+    }
+
+    bool ProtectProcess(DWORD processId, const WCHAR* processName, bool enable = true) {
+        printf("\n[*] %s process protection\n", enable ? "Enabling" : "Disabling");
+        printf("    PID:  %lu\n", processId);
+        printf("    Name: %ws\n", processName);
+
+        PROCESS_REQUEST req = { 0 };
+        req.ProcessId = (HANDLE)(ULONG_PTR)processId;
+        wcscpy_s(req.ProcessName, processName);
+        req.Enable = enable ? TRUE : FALSE;
+
+        bool result = SendIOCTL(IOCTL_PROTECT_PROCESS, &req, sizeof(req));
+
+        if (result) {
+            printf("[+] Process protection %s\n", enable ? "enabled" : "disabled");
+            printf("    -> Access rights stripped via ObCallbacks\n");
+            printf("    -> Cannot be terminated/read/written externally\n");
+        }
+        return result;
+    }
+};
 
 // ==================== MENU INTERFACE ====================
 
-void PrintMenu() {
+void PrintBanner() {
     printf("\n");
     printf("========================================\n");
-    printf("       Stealth Driver Client v1.0      \n");
+    printf("     GuardLink Driver Controller       \n");
+    printf("       Kernel-Mode Security Suite      \n");
     printf("========================================\n");
-    printf("1.  Set Target Process\n");
-    printf("2.  Enable/Disable Monitoring\n");
-    printf("3.  Read Process Memory\n");
-    printf("4.  Write Process Memory\n");
-    printf("5.  Get Module Base\n");
-    printf("6.  Install Hook\n");
-    printf("7.  Remove Hook\n");
-    printf("8.  Hide Process (DKOM)\n");
-    printf("9.  Protect Process (ObCallbacks)\n");
-    printf("10. Test Connection\n");
-    printf("0.  Exit\n");
-    printf("========================================\n");
+}
+
+void PrintMenu() {
+    printf("\n");
+    printf("======== MAIN MENU ========\n");
+    printf(" 1.  Set Target Process\n");
+    printf(" 2.  Enable/Disable Monitoring\n");
+    printf(" 3.  Read Process Memory\n");
+    printf(" 4.  Write Process Memory\n");
+    printf(" 5.  Get Module Base Address\n");
+    printf(" 6.  Install Function Hook\n");
+    printf(" 7.  Remove Function Hook\n");
+    printf(" 8.  Hide Process (DKOM)\n");
+    printf(" 9.  Protect Process (ObCallbacks)\n");
+    printf(" 10. List Running Processes\n");
+    printf(" 11. Test Driver Connection\n");
+    printf(" 0.  Exit\n");
+    printf("===========================\n");
     printf("Choice: ");
 }
 
-// ==================== MAIN ====================
+void ListProcesses() {
+    printf("\n[*] Enumerating running processes...\n\n");
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        printf("[-] Failed to create snapshot\n");
+        return;
+    }
+
+    PROCESSENTRY32W entry = { 0 };
+    entry.dwSize = sizeof(entry);
+
+    printf("%-8s %-40ws\n", "PID", "Process Name");
+    printf("------------------------------------------------------------\n");
+
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            printf("%-8lu %-40ws\n", entry.th32ProcessID, entry.szExeFile);
+        } while (Process32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    printf("\n");
+}
+
+// ==================== MAIN APPLICATION ====================
 
 int main() {
-    printf("========================================\n");
-    printf("  Stealth Driver Client - Usermode App \n");
-    printf("========================================\n\n");
+    ClearScreen();
+    PrintBanner();
 
-    Driver driver;
+    // Check admin privileges
+    BOOL isAdmin = FALSE;
+    PSID adminGroup = NULL;
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
 
-    // Conecta ao driver
+    if (AllocateAndInitializeSid(&ntAuthority, 2,
+        SECURITY_BUILTIN_DOMAIN_RID,
+        DOMAIN_ALIAS_RID_ADMINS,
+        0, 0, 0, 0, 0, 0, &adminGroup)) {
+        CheckTokenMembership(NULL, adminGroup, &isAdmin);
+        FreeSid(adminGroup);
+    }
+
+    if (!isAdmin) {
+        printf("\n[!] WARNING: Not running as Administrator\n");
+        printf("    Some operations may fail. Please run as Admin.\n\n");
+    }
+
+    // Initialize driver interface
+    DriverInterface driver;
+
+    printf("\n[*] Attempting to connect to driver...\n");
     if (!driver.Connect()) {
-        printf("[-] Failed to connect to driver\n");
-        printf("[*] Press any key to exit...\n");
+        printf("\n[-] Failed to connect to driver\n");
+        printf("[!] Make sure:\n");
+        printf("    1. Driver is loaded (sc start GuardLink)\n");
+        printf("    2. Running as Administrator\n");
+        printf("    3. Device path is correct\n");
+        printf("\n[*] Press any key to exit...\n");
         getchar();
         return 1;
     }
 
-    // Handshake
-    if (!driver.PerformHandshake()) {
-        printf("[-] Handshake failed\n");
-        printf("[*] Press any key to exit...\n");
-        getchar();
-        return 1;
-    }
+    printf("\n[+] Successfully connected to driver!\n");
+    printf("[*] Ready for operations\n");
 
-    printf("\n[+] Connection established successfully!\n");
-
-    // Menu loop
+    // Main loop
     while (true) {
         PrintMenu();
 
         int choice;
         if (scanf_s("%d", &choice) != 1) {
             while (getchar() != '\n');
+            printf("[-] Invalid input\n");
             continue;
         }
         while (getchar() != '\n');
 
-        printf("\n");
-
         switch (choice) {
-        case 1: {
+        case 1: { // Set Target Process
             WCHAR processName[260];
-            printf("Enter target process name (e.g., notepad.exe): ");
-            wscanf_s(L"%259s", processName, 260);
+            printf("\nEnter target process name (e.g., notepad.exe): ");
+            if (wscanf_s(L"%259s", processName, 260) == 1) {
+                driver.SetTargetProcess(processName);
+            }
             while (getwchar() != L'\n');
-
-            driver.SetTargetProcess(processName);
             break;
         }
 
-        case 2: {
-            printf("Enable monitoring? (1=Yes, 0=No): ");
+        case 2: { // Enable/Disable Monitoring
+            printf("\nEnable monitoring? (1=Yes, 0=No): ");
             int enable;
-            scanf_s("%d", &enable);
+            if (scanf_s("%d", &enable) == 1) {
+                driver.EnableMonitoring(enable != 0);
+            }
             while (getchar() != '\n');
-
-            driver.EnableMonitoring(enable != 0);
             break;
         }
 
-        case 3: {
+        case 3: { // Read Memory
             DWORD pid;
             ULONGLONG addr;
             SIZE_T size;
 
-            printf("Enter PID: ");
+            printf("\nEnter PID: ");
             scanf_s("%lu", &pid);
-            printf("Enter address (hex): ");
+            printf("Enter address (hex, e.g., 7FF12345): ");
             scanf_s("%llx", &addr);
-            printf("Enter size: ");
+            printf("Enter size (bytes, max 4096): ");
             scanf_s("%llu", &size);
             while (getchar() != '\n');
 
             if (size > 4096) {
-                printf("[-] Size too large (max 4096)\n");
+                printf("[-] Size too large (max 4096 bytes)\n");
                 break;
             }
 
             std::vector<BYTE> buffer(size);
             if (driver.ReadMemory(pid, (PVOID)addr, buffer.data(), size)) {
-                printf("\nMemory dump:\n");
                 PrintMemoryHex(buffer.data(), size);
             }
             break;
         }
 
-        case 4: {
+        case 4: { // Write Memory
             DWORD pid;
             ULONGLONG addr;
+            ULONGLONG value;
 
-            printf("Enter PID: ");
+            printf("\nEnter PID: ");
             scanf_s("%lu", &pid);
             printf("Enter address (hex): ");
             scanf_s("%llx", &addr);
-            printf("Enter value (hex, max 8 bytes): ");
-
-            ULONGLONG value;
+            printf("Enter value (hex, 8 bytes max): ");
             scanf_s("%llx", &value);
             while (getchar() != '\n');
 
@@ -647,11 +513,11 @@ int main() {
             break;
         }
 
-        case 5: {
+        case 5: { // Get Module Base
             DWORD pid;
             WCHAR moduleName[260];
 
-            printf("Enter PID: ");
+            printf("\nEnter PID: ");
             scanf_s("%lu", &pid);
             printf("Enter module name (e.g., kernel32.dll): ");
             wscanf_s(L"%259s", moduleName, 260);
@@ -663,29 +529,33 @@ int main() {
             break;
         }
 
-        case 6: {
+        case 6: { // Install Hook
             DWORD pid;
             ULONGLONG addr;
 
-            printf("Enter PID: ");
+            printf("\nEnter PID: ");
             scanf_s("%lu", &pid);
-            printf("Enter target address (hex): ");
+            printf("Enter function address to hook (hex): ");
             scanf_s("%llx", &addr);
             while (getchar() != '\n');
 
-            // Exemplo: JMP rel32 para endereço fictício
-            BYTE hookCode[] = { 0xE9, 0x00, 0x00, 0x00, 0x00 }; // jmp +0
+            // Example: Simple JMP hook (E9 = near jump)
+            BYTE hookCode[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 }; // jmp +0
+
+            printf("\n[!] Using example hook: JMP +0 (modify as needed)\n");
+            printf("[!] This will overwrite 5 bytes at target address\n");
+
             driver.InstallHook(pid, (PVOID)addr, hookCode, sizeof(hookCode));
             break;
         }
 
-        case 7: {
+        case 7: { // Remove Hook
             DWORD pid;
             ULONGLONG addr;
 
-            printf("Enter PID: ");
+            printf("\nEnter PID: ");
             scanf_s("%lu", &pid);
-            printf("Enter hook address (hex): ");
+            printf("Enter hooked address (hex): ");
             scanf_s("%llx", &addr);
             while (getchar() != '\n');
 
@@ -693,21 +563,34 @@ int main() {
             break;
         }
 
-        case 8: {
+        case 8: { // Hide Process
             DWORD pid;
-            printf("Enter PID to hide: ");
+            printf("\nEnter PID to hide: ");
             scanf_s("%lu", &pid);
             while (getchar() != '\n');
 
-            driver.HideProcess(pid);
+            printf("\n[!] WARNING: This will unlink the process from EPROCESS list\n");
+            printf("[!] The process will be invisible to Task Manager\n");
+            printf("[!] Continue? (y/n): ");
+
+            char confirm;
+            scanf_s("%c", &confirm, 1);
+            while (getchar() != '\n');
+
+            if (confirm == 'y' || confirm == 'Y') {
+                driver.HideProcess(pid);
+            }
+            else {
+                printf("[*] Operation cancelled\n");
+            }
             break;
         }
 
-        case 9: {
+        case 9: { // Protect Process
             DWORD pid;
             WCHAR processName[260];
 
-            printf("Enter PID: ");
+            printf("\nEnter PID: ");
             scanf_s("%lu", &pid);
             printf("Enter process name: ");
             wscanf_s(L"%259s", processName, 260);
@@ -717,27 +600,36 @@ int main() {
             break;
         }
 
-        case 10: {
+        case 10: { // List Processes
+            ListProcesses();
+            break;
+        }
+
+        case 11: { // Test Connection
             if (driver.IsConnected()) {
-                printf("[+] Connection is active and authenticated\n");
+                printf("\n[+] Driver connection is ACTIVE\n");
+                printf("    Status: Connected and ready\n");
             }
             else {
-                printf("[-] Not connected or not authenticated\n");
+                printf("\n[-] Driver connection is INACTIVE\n");
             }
             break;
         }
 
-        case 0:
-            printf("[*] Exiting...\n");
+        case 0: { // Exit
+            printf("\n[*] Exiting...\n");
             return 0;
+        }
 
         default:
-            printf("[-] Invalid choice\n");
+            printf("\n[-] Invalid choice\n");
             break;
         }
 
         printf("\n[*] Press Enter to continue...");
         getchar();
+        ClearScreen();
+        PrintBanner();
     }
 
     return 0;
