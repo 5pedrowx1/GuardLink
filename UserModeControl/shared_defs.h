@@ -9,81 +9,44 @@
 
 // ==================== INCLUDE HEADERS ====================
 #if IS_KERNEL_BUILD
-    // Kernel mode
 #include <ntddk.h>
 #include <ntstatus.h>    
 #else
-    // User mode
 #include <Windows.h>
 #endif
 
 // ==================== STRUCTURE DEFINITIONS ====================
-#pragma pack(push, 1)
+#pragma pack(push, 8)
 
-#if IS_KERNEL_BUILD
-    // ==================== KERNEL MODE ====================
 typedef struct _MEMORY_OPERATION {
-    void* ProcessId;
-    void* Address;
+    unsigned long long ProcessId;
+    unsigned long long Address;
     unsigned long long Size;
-    unsigned char Buffer[4096];  // Fixed size buffer
+    unsigned char Buffer[4096];
 } MEMORY_OPERATION, * PMEMORY_OPERATION;
 
 typedef struct _MODULE_REQUEST {
-    void* ProcessId;
+    unsigned long long ProcessId;
     wchar_t ModuleName[260];
 } MODULE_REQUEST, * PMODULE_REQUEST;
 
 typedef struct _MODULE_RESPONSE {
-    void* BaseAddress;
+    unsigned long long BaseAddress;
     unsigned long Size;
+    unsigned int Padding;  
 } MODULE_RESPONSE, * PMODULE_RESPONSE;
 
 typedef struct _HOOK_REQUEST {
-    void* ProcessId;
-    void* TargetAddress;
+    unsigned long long ProcessId;
+    unsigned long long TargetAddress;
     unsigned long HookSize;
     unsigned char HookCode[16];
 } HOOK_REQUEST, * PHOOK_REQUEST;
 
 typedef struct _PROCESS_REQUEST {
-    void* ProcessId;
+    unsigned long long ProcessId;
     wchar_t ProcessName[260];
     unsigned char Enable;
 } PROCESS_REQUEST, * PPROCESS_REQUEST;
-
-#else
-    // ==================== USER MODE ====================
-typedef struct _MEMORY_OPERATION {
-    HANDLE ProcessId;
-    PVOID Address;
-    ULONGLONG Size;
-    UCHAR Buffer[4096];  // Fixed size buffer
-} MEMORY_OPERATION, * PMEMORY_OPERATION;
-
-typedef struct _MODULE_REQUEST {
-    HANDLE ProcessId;
-    WCHAR ModuleName[260];
-} MODULE_REQUEST, * PMODULE_REQUEST;
-
-typedef struct _MODULE_RESPONSE {
-    PVOID BaseAddress;
-    ULONG Size;
-} MODULE_RESPONSE, * PMODULE_RESPONSE;
-
-typedef struct _HOOK_REQUEST {
-    HANDLE ProcessId;
-    PVOID TargetAddress;
-    ULONG HookSize;
-    UCHAR HookCode[16];
-} HOOK_REQUEST, * PHOOK_REQUEST;
-
-typedef struct _PROCESS_REQUEST {
-    HANDLE ProcessId;
-    WCHAR ProcessName[260];
-    BOOLEAN Enable;
-} PROCESS_REQUEST, * PPROCESS_REQUEST;
-
-#endif
 
 #pragma pack(pop)

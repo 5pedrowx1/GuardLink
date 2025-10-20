@@ -1,12 +1,10 @@
-﻿// ==================== INCLUDES (CORRECT ORDER) ====================
-#include <ntddk.h>
+﻿#include <ntddk.h>
 #include <ntstatus.h>
 #include <ntstrsafe.h>
 #include <ntimage.h>
 #include "shared_defs.h"
 
 // ==================== IOCTL DEFINITIONS ====================
-// CTL_CODE is already defined in wdm.h, so we don't redefine it
 
 #define IOCTL_SET_TARGET       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_ENABLE_MONITOR   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -18,7 +16,7 @@
 #define IOCTL_HIDE_PROCESS     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_PROTECT_PROCESS  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x808, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-// ==================== CONFIGURAÇÃO ====================
+// ==================== Config ====================
 
 #define DEVICE_NAME L"\\Device\\{A7C5E891-2D3F-4B5A-9E8C-1F6D3A7B9C4E}"
 #define DOS_NAME L"\\DosDevices\\Global\\GuardLink"
@@ -34,7 +32,6 @@
 #define PROCESS_SUSPEND_RESUME 0x0800
 #define PROCESS_TERMINATE 0x0001
 
-// Memory constants
 #define MEM_IMAGE 0x1000000
 #define MEM_COMMIT 0x1000
 #define PAGE_EXECUTE_READ 0x20
@@ -157,7 +154,7 @@ NTKERNELAPI NTSTATUS ObOpenObjectByPointer(
     _Out_ PHANDLE Handle
 );
 
-// ==================== UTILIDADES ====================
+// ==================== UTILS ====================
 
 PPROTECTED_PROCESS FindProtectedProcess(HANDLE ProcessId) {
     KIRQL oldIrql;
@@ -263,7 +260,7 @@ NTSTATUS WriteProcessMemory(
     return status;
 }
 
-// ==================== MODULE ENUMERATION (NEW METHOD) ====================
+// ==================== MODULE ENUMERATION ====================
 
 BOOLEAN IsValidPEHeader(PVOID BaseAddress) {
     BOOLEAN result = FALSE;
@@ -338,11 +335,7 @@ NTSTATUS GetModuleBaseAlternative(
 
     DbgLog("GetModuleBaseAlt: Scanning memory regions...\n");
 
-#ifdef _WIN64
     PVOID maxAddress = (PVOID)0x00007FFFFFFFFFFF;
-#else
-    PVOID maxAddress = (PVOID)0x7FFFFFFF;
-#endif
 
     int regionCount = 0;
     int imageCount = 0;
@@ -810,8 +803,10 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
         PMEMORY_OPERATION memOp = (PMEMORY_OPERATION)inputBuffer;
         PMEMORY_OPERATION output = (PMEMORY_OPERATION)outputBuffer;
 
-        status = ReadProcessMemory(memOp->ProcessId, memOp->Address,
-            output->Buffer, (SIZE_T)memOp->Size);
+        HANDLE pid = (HANDLE)(ULONG_PTR)memOp->ProcessId;
+        PVOID address = (PVOID)(ULONG_PTR)memOp->Address;
+
+        status = ReadProcessMemory(pid, address, output->Buffer, (SIZE_T)memOp->Size);
 
         if (NT_SUCCESS(status)) {
             bytesReturned = (ULONG)(sizeof(MEMORY_OPERATION));
@@ -826,8 +821,11 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
         }
 
         PMEMORY_OPERATION memOp = (PMEMORY_OPERATION)inputBuffer;
-        status = WriteProcessMemory(memOp->ProcessId, memOp->Address,
-            memOp->Buffer, (SIZE_T)memOp->Size);
+
+        HANDLE pid = (HANDLE)(ULONG_PTR)memOp->ProcessId;
+        PVOID address = (PVOID)(ULONG_PTR)memOp->Address;
+
+        status = WriteProcessMemory(pid, address, memOp->Buffer, (SIZE_T)memOp->Size);
         break;
     }
 
@@ -843,24 +841,32 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
         PMODULE_REQUEST modReq = (PMODULE_REQUEST)inputBuffer;
         PMODULE_RESPONSE modResp = (PMODULE_RESPONSE)outputBuffer;
 
-        DbgLog("IOCTL_GET_MODULE: PID=%p, Module=%ws\n",
-            modReq->ProcessId, modReq->ModuleName);
+        HANDLE processId = (HANDLE)(ULONG_PTR)modReq->ProcessId;
+        PVOID baseAddr = NULL;
+        ULONG size = 0;
+
+        DbgLog("IOCTL_GET_MODULE: PID=%llu (0x%llX), Module=%ws\n",
+            modReq->ProcessId, modReq->ProcessId, modReq->ModuleName);
 
         // Try new method first
-        status = GetModuleBaseAlternative(modReq->ProcessId, modReq->ModuleName,
-            &modResp->BaseAddress, &modResp->Size);
+        status = GetModuleBaseAlternative(processId, modReq->ModuleName,
+            &baseAddr, &size);
 
         // If failed, try old PEB method as fallback
         if (!NT_SUCCESS(status)) {
             DbgLog("IOCTL_GET_MODULE: Alternative method failed, trying PEB method...\n");
-            status = GetModuleBase(modReq->ProcessId, modReq->ModuleName,
-                &modResp->BaseAddress, &modResp->Size);
+            status = GetModuleBase(processId, modReq->ModuleName,
+                &baseAddr, &size);
         }
 
         DbgLog("IOCTL_GET_MODULE: Result=0x%08X, Base=%p, Size=0x%X\n",
-            status, modResp->BaseAddress, modResp->Size);
+            status, baseAddr, size);
 
         if (NT_SUCCESS(status)) {
+            ULONG_PTR addrValue = (ULONG_PTR)baseAddr;
+            modResp->BaseAddress = (unsigned long long)addrValue;
+            modResp->Size = size;
+            modResp->Padding = 0;
             bytesReturned = sizeof(MODULE_RESPONSE);
         }
         break;
@@ -873,8 +879,11 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
         }
 
         PHOOK_REQUEST hookReq = (PHOOK_REQUEST)inputBuffer;
-        status = InstallInlineHook(hookReq->ProcessId, hookReq->TargetAddress,
-            hookReq->HookCode, hookReq->HookSize);
+
+        HANDLE pid = (HANDLE)(ULONG_PTR)hookReq->ProcessId;
+        PVOID targetAddr = (PVOID)(ULONG_PTR)hookReq->TargetAddress;
+
+        status = InstallInlineHook(pid, targetAddr, hookReq->HookCode, hookReq->HookSize);
         break;
     }
 
@@ -885,17 +894,23 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
         }
 
         PHOOK_REQUEST hookReq = (PHOOK_REQUEST)inputBuffer;
-        status = RemoveHook(hookReq->ProcessId, hookReq->TargetAddress);
+
+        HANDLE pid = (HANDLE)(ULONG_PTR)hookReq->ProcessId;
+        PVOID targetAddr = (PVOID)(ULONG_PTR)hookReq->TargetAddress;
+
+        status = RemoveHook(pid, targetAddr);
         break;
     }
 
     case IOCTL_HIDE_PROCESS: {
-        if (inputLength < sizeof(HANDLE)) {
+        if (inputLength < sizeof(unsigned long long)) {
             status = STATUS_INVALID_PARAMETER;
             break;
         }
 
-        HANDLE pid = *(PHANDLE)inputBuffer;
+        unsigned long long pidValue = *(unsigned long long*)inputBuffer;
+        HANDLE pid = (HANDLE)(ULONG_PTR)pidValue;
+
         status = HideProcessFromList(pid);
         break;
     }
@@ -907,11 +922,14 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
         }
 
         PPROCESS_REQUEST procReq = (PPROCESS_REQUEST)inputBuffer;
-        PPROTECTED_PROCESS existingProc = FindProtectedProcess(procReq->ProcessId);
+
+        HANDLE pid = (HANDLE)(ULONG_PTR)procReq->ProcessId;
+
+        PPROTECTED_PROCESS existingProc = FindProtectedProcess(pid);
 
         if (procReq->Enable && !existingProc) {
             PEPROCESS process;
-            status = PsLookupProcessByProcessId(procReq->ProcessId, &process);
+            status = PsLookupProcessByProcessId(pid, &process);
 
             if (NT_SUCCESS(status)) {
                 PPROTECTED_PROCESS protectedProc =
@@ -920,7 +938,7 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
 
                 if (protectedProc) {
                     RtlZeroMemory(protectedProc, sizeof(PROTECTED_PROCESS));
-                    protectedProc->ProcessId = procReq->ProcessId;
+                    protectedProc->ProcessId = pid;
                     protectedProc->Process = process;
                     protectedProc->IsHidden = FALSE;
                     InitializeListHead(&protectedProc->HookList);
@@ -930,7 +948,7 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
                     InsertTailList(&g_Context->ProcessList, &protectedProc->ListEntry);
                     KeReleaseSpinLock(&g_Context->ProcessListLock, oldIrql);
 
-                    DbgLog("Process %p protected\n", procReq->ProcessId);
+                    DbgLog("Process %p protected\n", pid);
                     status = STATUS_SUCCESS;
                 }
                 else {
@@ -948,7 +966,7 @@ NTSTATUS DeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
             if (existingProc->Process) ObDereferenceObject(existingProc->Process);
             ExFreePoolWithTag(existingProc, TAG_POOL);
 
-            DbgLog("Process %p unprotected\n", procReq->ProcessId);
+            DbgLog("Process %p unprotected\n", pid);
             status = STATUS_SUCCESS;
         }
         else {

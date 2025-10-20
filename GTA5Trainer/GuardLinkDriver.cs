@@ -6,49 +6,44 @@ namespace GTATrainer
 {
     public class GuardLinkDriver : IDisposable
     {
-        // ==================== CONSTANTS ====================
-
         private const string DEVICE_PATH = @"\\.\Global\GuardLink";
 
-        // ⚠️ IOCTL codes MUST match the driver's CTL_CODE macro
-        // Formula: ((DeviceType << 16) | (Access << 14) | (Function << 2) | Method)
-        // FILE_DEVICE_UNKNOWN = 0x22, METHOD_BUFFERED = 0, FILE_ANY_ACCESS = 0
+        private const uint IOCTL_SET_TARGET = 0x00222000;
+        private const uint IOCTL_ENABLE_MONITOR = 0x00222004;
+        private const uint IOCTL_READ_MEMORY = 0x00222008;
+        private const uint IOCTL_WRITE_MEMORY = 0x0022200C;
+        private const uint IOCTL_GET_MODULE = 0x00222010;
+        private const uint IOCTL_INSTALL_HOOK = 0x00222014;
+        private const uint IOCTL_REMOVE_HOOK = 0x00222018;
+        private const uint IOCTL_HIDE_PROCESS = 0x0022201C;
+        private const uint IOCTL_PROTECT_PROCESS = 0x00222020;
 
-        private const uint IOCTL_SET_TARGET = 0x00222000; // 0x800 << 2
-        private const uint IOCTL_ENABLE_MONITOR = 0x00222004; // 0x801 << 2
-        private const uint IOCTL_READ_MEMORY = 0x00222008; // 0x802 << 2
-        private const uint IOCTL_WRITE_MEMORY = 0x0022200C; // 0x803 << 2
-        private const uint IOCTL_GET_MODULE = 0x00222010; // 0x804 << 2
-        private const uint IOCTL_INSTALL_HOOK = 0x00222014; // 0x805 << 2
-        private const uint IOCTL_REMOVE_HOOK = 0x00222018; // 0x806 << 2
-        private const uint IOCTL_HIDE_PROCESS = 0x0022201C; // 0x807 << 2
-        private const uint IOCTL_PROTECT_PROCESS = 0x00222020; // 0x808 << 2
+        // ==================== STRUCTURES (FIXED ALIGNMENT) ====================
 
-        // ==================== STRUCTURES ====================
-
-        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        [StructLayout(LayoutKind.Sequential, Pack = 8)]
         public struct MEMORY_OPERATION
         {
-            public IntPtr ProcessId;
-            public IntPtr Address;
+            public ulong ProcessId;
+            public ulong Address;   
             public ulong Size;
             [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4096)]
             public byte[] Buffer;
         }
 
-        [StructLayout(LayoutKind.Sequential, Pack = 1, CharSet = CharSet.Unicode)]
+        [StructLayout(LayoutKind.Sequential, Pack = 8, CharSet = CharSet.Unicode)]
         public struct MODULE_REQUEST
         {
-            public IntPtr ProcessId;
+            public ulong ProcessId;  
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
             public string ModuleName;
         }
 
-        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        [StructLayout(LayoutKind.Sequential, Pack = 8)]
         public struct MODULE_RESPONSE
         {
-            public IntPtr BaseAddress;
+            public ulong BaseAddress;  
             public uint Size;
+            public uint Padding;      
         }
 
         // ==================== P/INVOKE ====================
@@ -74,12 +69,8 @@ namespace GTATrainer
             out uint lpBytesReturned,
             IntPtr lpOverlapped);
 
-        // ==================== FIELDS ====================
-
         private SafeFileHandle _driverHandle;
         private bool _disposed = false;
-
-        // ==================== CONSTRUCTOR ====================
 
         public GuardLinkDriver()
         {
@@ -88,11 +79,11 @@ namespace GTATrainer
 
             _driverHandle = CreateFile(
                 DEVICE_PATH,
-                0xC0000000, // GENERIC_READ | GENERIC_WRITE
-                0,          // No sharing
+                0xC0000000,
+                0,
                 IntPtr.Zero,
-                3,          // OPEN_EXISTING
-                0x80,       // FILE_ATTRIBUTE_NORMAL
+                3,
+                0x80,
                 IntPtr.Zero);
 
             if (_driverHandle.IsInvalid)
@@ -105,15 +96,12 @@ namespace GTATrainer
             Console.WriteLine("[+] Driver connection established");
         }
 
-        // ==================== PUBLIC METHODS ====================
-
         public byte[] ReadMemory(int processId, IntPtr address, int size)
         {
             if (size <= 0 || size > 4096)
                 throw new ArgumentException("Size must be between 1 and 4096 bytes");
 
             int structSize = Marshal.SizeOf<MEMORY_OPERATION>();
-
             IntPtr inBuffer = Marshal.AllocHGlobal(structSize);
             IntPtr outBuffer = Marshal.AllocHGlobal(structSize);
 
@@ -121,8 +109,8 @@ namespace GTATrainer
             {
                 var request = new MEMORY_OPERATION
                 {
-                    ProcessId = new IntPtr(processId),
-                    Address = address,
+                    ProcessId = (ulong)processId,        
+                    Address = (ulong)address.ToInt64(),
                     Size = (ulong)size,
                     Buffer = new byte[4096]
                 };
@@ -146,7 +134,6 @@ namespace GTATrainer
                 }
 
                 var response = Marshal.PtrToStructure<MEMORY_OPERATION>(outBuffer);
-
                 byte[] result = new byte[size];
                 Array.Copy(response.Buffer, result, size);
 
@@ -171,8 +158,8 @@ namespace GTATrainer
             {
                 var request = new MEMORY_OPERATION
                 {
-                    ProcessId = new IntPtr(processId),
-                    Address = address,
+                    ProcessId = (ulong)processId,           
+                    Address = (ulong)address.ToInt64(),     
                     Size = (ulong)data.Length,
                     Buffer = new byte[4096]
                 };
@@ -208,11 +195,10 @@ namespace GTATrainer
         public IntPtr GetModuleBase(int processId, string moduleName)
         {
             Console.WriteLine($"[*] GetModuleBase: PID={processId}, Module={moduleName}");
-            Console.WriteLine($"[*] Using IOCTL: 0x{IOCTL_GET_MODULE:X8}");
 
             var request = new MODULE_REQUEST
             {
-                ProcessId = new IntPtr(processId),
+                ProcessId = (ulong)processId,  
                 ModuleName = moduleName
             };
 
@@ -241,14 +227,13 @@ namespace GTATrainer
                     int error = Marshal.GetLastWin32Error();
                     string errorMsg = GetWin32ErrorMessage(error);
                     Console.WriteLine($"[-] GetModuleBase failed: Error {error} (0x{error:X}) - {errorMsg}");
-                    Console.WriteLine($"[-] Bytes returned: {bytesReturned}");
                     return IntPtr.Zero;
                 }
 
                 var response = Marshal.PtrToStructure<MODULE_RESPONSE>(outBuffer);
-                Console.WriteLine($"[+] Module base: 0x{response.BaseAddress.ToInt64():X16}, Size: 0x{response.Size:X}");
+                Console.WriteLine($"[+] Module base: 0x{response.BaseAddress:X16}, Size: 0x{response.Size:X}");
 
-                return response.BaseAddress;
+                return new IntPtr((long)response.BaseAddress);  
             }
             finally
             {
@@ -256,8 +241,6 @@ namespace GTATrainer
                 Marshal.FreeHGlobal(outBuffer);
             }
         }
-
-        // ==================== HELPER METHODS ====================
 
         public T Read<T>(int processId, IntPtr address) where T : struct
         {
@@ -299,18 +282,16 @@ namespace GTATrainer
         {
             return errorCode switch
             {
-                1 => "ERROR_INVALID_FUNCTION - The IOCTL code doesn't match",
-                2 => "ERROR_FILE_NOT_FOUND - Driver device not found",
-                5 => "ERROR_ACCESS_DENIED - Insufficient privileges",
-                6 => "ERROR_INVALID_HANDLE - Invalid driver handle",
-                87 => "ERROR_INVALID_PARAMETER - Invalid buffer or parameters",
-                995 => "ERROR_OPERATION_ABORTED - Operation canceled",
-                1784 => "ERROR_INVALID_OWNER - Security context issue",
-                _ => $"Unknown error code: {errorCode}"
+                1 => "ERROR_INVALID_FUNCTION",
+                2 => "ERROR_FILE_NOT_FOUND",
+                5 => "ERROR_ACCESS_DENIED",
+                6 => "ERROR_INVALID_HANDLE",
+                87 => "ERROR_INVALID_PARAMETER",
+                995 => "ERROR_OPERATION_ABORTED",
+                1784 => "ERROR_INVALID_OWNER",
+                _ => $"Unknown error: {errorCode}"
             };
         }
-
-        // ==================== DISPOSABLE PATTERN ====================
 
         public void Dispose()
         {

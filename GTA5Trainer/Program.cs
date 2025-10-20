@@ -32,32 +32,32 @@ namespace GTATrainer
 
                     switch (key.Key)
                     {
-                        case ConsoleKey.NumPad1:
+                        case ConsoleKey.F1:
                             Console.WriteLine("[*] Setting God Mode...");
                             gta.EnableGodMode(true);
                             Console.WriteLine("[+] God Mode Enabled!");
                             break;
 
-                        case ConsoleKey.NumPad2:
+                        case ConsoleKey.F2:
                             Console.WriteLine("[*] Disabling God Mode...");
                             gta.EnableGodMode(false);
                             Console.WriteLine("[+] God Mode Disabled!");
                             break;
 
-                        case ConsoleKey.NumPad3:
+                        case ConsoleKey.F3:
                             Console.WriteLine("[*] Clearing wanted level...");
                             gta.SetWantedLevel(0);
                             Console.WriteLine("[+] Wanted level cleared!");
                             break;
 
-                        case ConsoleKey.NumPad4:
+                        case ConsoleKey.F4:
                             Console.WriteLine("[*] Refilling health & armor...");
                             gta.SetHealth(328.0f);
                             gta.SetArmor(100.0f);
                             Console.WriteLine("[+] Health & Armor refilled!");
                             break;
 
-                        case ConsoleKey.NumPad5:
+                        case ConsoleKey.F5:
                             var pos = gta.GetPosition();
                             Console.WriteLine($"[*] Current Position:");
                             Console.WriteLine($"    X: {pos.x:F2}");
@@ -65,13 +65,13 @@ namespace GTATrainer
                             Console.WriteLine($"    Z: {pos.z:F2}");
                             break;
 
-                        case ConsoleKey.NumPad6:
+                        case ConsoleKey.F6:
                             Console.WriteLine("[*] Teleporting to airport...");
                             gta.Teleport(-1336.0f, -3044.0f, 14.0f);
                             Console.WriteLine("[+] Teleported!");
                             break;
 
-                        case ConsoleKey.NumPad0:
+                        case ConsoleKey.F7:
                             running = false;
                             break;
 
@@ -99,13 +99,13 @@ namespace GTATrainer
         static void PrintMenu()
         {
             Console.WriteLine("\n========= MENU =========");
-            Console.WriteLine("NumPad1 - God Mode ON");
-            Console.WriteLine("NumPad2 - God Mode OFF");
-            Console.WriteLine("NumPad3 - Clear Wanted");
-            Console.WriteLine("NumPad4 - Refill HP/Armor");
-            Console.WriteLine("NumPad5 - Show Position");
-            Console.WriteLine("NumPad6 - TP to Airport");
-            Console.WriteLine("NumPad0 - Exit");
+            Console.WriteLine("F1 - God Mode ON");
+            Console.WriteLine("F2 - God Mode OFF");
+            Console.WriteLine("F3 - Clear Wanted");
+            Console.WriteLine("F4 - Refill HP/Armor");
+            Console.WriteLine("F5 - Show Position");
+            Console.WriteLine("F6 - TP to Airport");
+            Console.WriteLine("F7 - Exit");
             Console.WriteLine("========================\n");
         }
     }
