@@ -2,29 +2,20 @@
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
-namespace GTATrainer
+namespace GTAOffsetFinder
 {
     public class GuardLinkDriver : IDisposable
     {
         private const string DEVICE_PATH = @"\\.\Global\GuardLink";
-
-        private const uint IOCTL_SET_TARGET = 0x00222000;
-        private const uint IOCTL_ENABLE_MONITOR = 0x00222004;
         private const uint IOCTL_READ_MEMORY = 0x00222008;
         private const uint IOCTL_WRITE_MEMORY = 0x0022200C;
         private const uint IOCTL_GET_MODULE = 0x00222010;
-        private const uint IOCTL_INSTALL_HOOK = 0x00222014;
-        private const uint IOCTL_REMOVE_HOOK = 0x00222018;
-        private const uint IOCTL_HIDE_PROCESS = 0x0022201C;
-        private const uint IOCTL_PROTECT_PROCESS = 0x00222020;
-
-        // ==================== STRUCTURES ====================
 
         [StructLayout(LayoutKind.Sequential, Pack = 8)]
         public struct MEMORY_OPERATION
         {
             public ulong ProcessId;
-            public ulong Address;   
+            public ulong Address;
             public ulong Size;
             [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4096)]
             public byte[] Buffer;
@@ -33,7 +24,7 @@ namespace GTATrainer
         [StructLayout(LayoutKind.Sequential, Pack = 8, CharSet = CharSet.Unicode)]
         public struct MODULE_REQUEST
         {
-            public ulong ProcessId;  
+            public ulong ProcessId;
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
             public string ModuleName;
         }
@@ -41,12 +32,10 @@ namespace GTATrainer
         [StructLayout(LayoutKind.Sequential, Pack = 8)]
         public struct MODULE_RESPONSE
         {
-            public ulong BaseAddress;  
+            public ulong BaseAddress;
             public uint Size;
-            public uint Padding;      
+            public uint Padding;
         }
-
-        // ==================== P/INVOKE ====================
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern SafeFileHandle CreateFile(
@@ -74,9 +63,6 @@ namespace GTATrainer
 
         public GuardLinkDriver()
         {
-            Console.WriteLine("[*] Opening driver connection...");
-            Console.WriteLine($"[*] Device path: {DEVICE_PATH}");
-
             _driverHandle = CreateFile(
                 DEVICE_PATH,
                 0xC0000000,
@@ -89,11 +75,8 @@ namespace GTATrainer
             if (_driverHandle.IsInvalid)
             {
                 int error = Marshal.GetLastWin32Error();
-                string errorMsg = GetWin32ErrorMessage(error);
-                throw new Exception($"Failed to open driver: Error {error} (0x{error:X}) - {errorMsg}");
+                throw new Exception($"Failed to open driver: Error {error} (0x{error:X})");
             }
-
-            Console.WriteLine("[+] Driver connection established");
         }
 
         public byte[] ReadMemory(int processId, IntPtr address, int size)
@@ -109,7 +92,7 @@ namespace GTATrainer
             {
                 var request = new MEMORY_OPERATION
                 {
-                    ProcessId = (ulong)processId,        
+                    ProcessId = (ulong)processId,
                     Address = (ulong)address.ToInt64(),
                     Size = (ulong)size,
                     Buffer = new byte[4096]
@@ -130,7 +113,7 @@ namespace GTATrainer
                 if (!success)
                 {
                     int error = Marshal.GetLastWin32Error();
-                    throw new Exception($"ReadMemory failed: Error {error} (0x{error:X}) - {GetWin32ErrorMessage(error)}");
+                    throw new Exception($"ReadMemory failed: Error {error} (0x{error:X})");
                 }
 
                 var response = Marshal.PtrToStructure<MEMORY_OPERATION>(outBuffer);
@@ -158,8 +141,8 @@ namespace GTATrainer
             {
                 var request = new MEMORY_OPERATION
                 {
-                    ProcessId = (ulong)processId,           
-                    Address = (ulong)address.ToInt64(),     
+                    ProcessId = (ulong)processId,
+                    Address = (ulong)address.ToInt64(),
                     Size = (ulong)data.Length,
                     Buffer = new byte[4096]
                 };
@@ -180,7 +163,6 @@ namespace GTATrainer
                 if (!success)
                 {
                     int error = Marshal.GetLastWin32Error();
-                    Console.WriteLine($"[-] WriteMemory failed: Error {error} (0x{error:X}) - {GetWin32ErrorMessage(error)}");
                     return false;
                 }
 
@@ -194,11 +176,9 @@ namespace GTATrainer
 
         public IntPtr GetModuleBase(int processId, string moduleName)
         {
-            Console.WriteLine($"[*] GetModuleBase: PID={processId}, Module={moduleName}");
-
             var request = new MODULE_REQUEST
             {
-                ProcessId = (ulong)processId,  
+                ProcessId = (ulong)processId,
                 ModuleName = moduleName
             };
 
@@ -225,15 +205,11 @@ namespace GTATrainer
                 if (!success)
                 {
                     int error = Marshal.GetLastWin32Error();
-                    string errorMsg = GetWin32ErrorMessage(error);
-                    Console.WriteLine($"[-] GetModuleBase failed: Error {error} (0x{error:X}) - {errorMsg}");
                     return IntPtr.Zero;
                 }
 
                 var response = Marshal.PtrToStructure<MODULE_RESPONSE>(outBuffer);
-                Console.WriteLine($"[+] Module base: 0x{response.BaseAddress:X16}, Size: 0x{response.Size:X}");
-
-                return new IntPtr((long)response.BaseAddress);  
+                return new IntPtr((long)response.BaseAddress);
             }
             finally
             {
@@ -276,21 +252,6 @@ namespace GTATrainer
             {
                 Marshal.FreeHGlobal(ptr);
             }
-        }
-
-        private string GetWin32ErrorMessage(int errorCode)
-        {
-            return errorCode switch
-            {
-                1 => "ERROR_INVALID_FUNCTION",
-                2 => "ERROR_FILE_NOT_FOUND",
-                5 => "ERROR_ACCESS_DENIED",
-                6 => "ERROR_INVALID_HANDLE",
-                87 => "ERROR_INVALID_PARAMETER",
-                995 => "ERROR_OPERATION_ABORTED",
-                1784 => "ERROR_INVALID_OWNER",
-                _ => $"Unknown error: {errorCode}"
-            };
         }
 
         public void Dispose()

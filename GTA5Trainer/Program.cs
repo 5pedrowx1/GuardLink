@@ -1,7 +1,4 @@
-﻿using System;
-using System.Threading;
-
-namespace GTATrainer
+﻿namespace GTATrainer
 {
     class Program
     {

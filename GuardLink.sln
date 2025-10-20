@@ -11,6 +11,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GTA5Trainer", "GTA5Trainer\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Debug", "Debug\Debug.csproj", "{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GTAOffsetFinder", "GTAOffsetFinder\GTAOffsetFinder.csproj", "{FC951AC5-A68A-4A9B-973D-EA77838F19EB}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -75,6 +77,18 @@ Global
 		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Release|ARM64.Build.0 = Release|Any CPU
 		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Release|x64.ActiveCfg = Release|Any CPU
 		{A2D4BDF7-341C-445D-862B-5A5FE1DEBCAE}.Release|x64.Build.0 = Release|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Debug|ARM64.ActiveCfg = Debug|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Debug|ARM64.Build.0 = Debug|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Debug|x64.Build.0 = Debug|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Release|ARM64.ActiveCfg = Release|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Release|ARM64.Build.0 = Release|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Release|x64.ActiveCfg = Release|Any CPU
+		{FC951AC5-A68A-4A9B-973D-EA77838F19EB}.Release|x64.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

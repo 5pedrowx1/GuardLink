@@ -11,32 +11,15 @@ namespace GTATrainer
         private Process _process;
         private IntPtr _baseAddress;
 
-        // ==================== OFFSETS (GTA V 1.69) ====================
-        // Nota: Estes offsets mudam a cada atualização!
-
-        private const int OFFSET_WORLD = 0x2504BA0;
-        private const int OFFSET_PLAYER = 0x08;
-        private const int OFFSET_HEALTH = 0x280;
-        private const int OFFSET_MAX_HEALTH = 0x2A0;
-        private const int OFFSET_ARMOR = 0x14B0;
-        private const int OFFSET_WANTED_LEVEL = 0x10C8;
-        private const int OFFSET_MONEY = 0x1000;
-
-        private const int OFFSET_POS_X = 0x90;
-        private const int OFFSET_POS_Y = 0x94;
-        private const int OFFSET_POS_Z = 0x98;
-
         // ==================== CONSTRUCTOR ====================
 
         public GTA5Memory()
         {
-            // Verificar se está rodando como administrador
             if (!IsAdministrator())
             {
                 throw new Exception("This program must run as Administrator!");
             }
 
-            // Verificar se o driver está carregado
             if (!IsDriverLoaded())
             {
                 throw new Exception("GuardLink driver is not loaded!\nRun in Administrator command prompt:\n  sc start GuardLink");
@@ -44,7 +27,6 @@ namespace GTATrainer
 
             _driver = new GuardLinkDriver();
 
-            // Encontrar processo do GTA
             Process[] processes = Process.GetProcessesByName("GTA5");
             if (processes.Length == 0)
             {
@@ -54,7 +36,6 @@ namespace GTATrainer
             _process = processes[0];
             Console.WriteLine($"[+] GTA 5 found: PID={_process.Id}");
 
-            // Obter base do executável
             _baseAddress = _driver.GetModuleBase(_process.Id, "GTA5.exe");
             if (_baseAddress == IntPtr.Zero)
             {
@@ -62,6 +43,12 @@ namespace GTATrainer
             }
 
             Console.WriteLine($"[+] GTA5.exe base: 0x{_baseAddress.ToInt64():X}");
+
+            //Console.WriteLine("\n[*] Detecting GTA V version...");
+            //string version = GTA5Offsets.DetectVersion(_driver, _process.Id, _baseAddress);
+            //Console.WriteLine($"[*] Detected version: {version}");
+
+            //Console.WriteLine("[+] Offsets loaded successfully");
         }
 
         // ==================== ADMIN CHECK ====================
@@ -99,13 +86,12 @@ namespace GTATrainer
             {
                 Console.WriteLine("[*] Checking if driver device exists...");
 
-                // Tentar abrir o dispositivo
                 SafeFileHandle handle = CreateFile(
                     @"\\.\Global\GuardLink",
-                    0x80000000, // GENERIC_READ
+                    0x80000000, 
                     0,
                     IntPtr.Zero,
-                    3, // OPEN_EXISTING
+                    3, 
                     0,
                     IntPtr.Zero);
 
@@ -135,12 +121,12 @@ namespace GTATrainer
         private IntPtr GetPlayerPointer()
         {
             IntPtr worldPtr = _driver.Read<IntPtr>(_process.Id,
-                IntPtr.Add(_baseAddress, OFFSET_WORLD));
+                IntPtr.Add(_baseAddress, GTA5Offsets.WorldPtrOffset));
 
             if (worldPtr == IntPtr.Zero) return IntPtr.Zero;
 
             IntPtr playerPtr = _driver.Read<IntPtr>(_process.Id,
-                IntPtr.Add(worldPtr, OFFSET_PLAYER));
+                IntPtr.Add(worldPtr, GTA5Offsets.PlayerOffset));
 
             return playerPtr;
         }
@@ -153,7 +139,7 @@ namespace GTATrainer
             if (player == IntPtr.Zero) return 0;
 
             return _driver.Read<float>(_process.Id,
-                IntPtr.Add(player, OFFSET_HEALTH));
+                IntPtr.Add(player, GTA5Offsets.HealthOffset));
         }
 
         public void SetHealth(float value)
@@ -162,7 +148,7 @@ namespace GTATrainer
             if (player == IntPtr.Zero) return;
 
             _driver.Write(_process.Id,
-                IntPtr.Add(player, OFFSET_HEALTH), value);
+                IntPtr.Add(player, GTA5Offsets.HealthOffset), value);
         }
 
         public void SetMaxHealth(float value)
@@ -171,7 +157,7 @@ namespace GTATrainer
             if (player == IntPtr.Zero) return;
 
             _driver.Write(_process.Id,
-                IntPtr.Add(player, OFFSET_MAX_HEALTH), value);
+                IntPtr.Add(player, GTA5Offsets.MaxHealthOffset), value);
         }
 
         public float GetArmor()
@@ -180,7 +166,7 @@ namespace GTATrainer
             if (player == IntPtr.Zero) return 0;
 
             return _driver.Read<float>(_process.Id,
-                IntPtr.Add(player, OFFSET_ARMOR));
+                IntPtr.Add(player, GTA5Offsets.ArmorOffset));
         }
 
         public void SetArmor(float value)
@@ -189,7 +175,7 @@ namespace GTATrainer
             if (player == IntPtr.Zero) return;
 
             _driver.Write(_process.Id,
-                IntPtr.Add(player, OFFSET_ARMOR), value);
+                IntPtr.Add(player, GTA5Offsets.ArmorOffset), value);
         }
 
         public int GetWantedLevel()
@@ -198,7 +184,7 @@ namespace GTATrainer
             if (player == IntPtr.Zero) return 0;
 
             return _driver.Read<int>(_process.Id,
-                IntPtr.Add(player, OFFSET_WANTED_LEVEL));
+                IntPtr.Add(player, GTA5Offsets.WantedLevelOffset));
         }
 
         public void SetWantedLevel(int value)
@@ -207,7 +193,7 @@ namespace GTATrainer
             if (player == IntPtr.Zero) return;
 
             _driver.Write(_process.Id,
-                IntPtr.Add(player, OFFSET_WANTED_LEVEL), value);
+                IntPtr.Add(player, GTA5Offsets.WantedLevelOffset), value);
         }
 
         public (float x, float y, float z) GetPosition()
@@ -215,9 +201,9 @@ namespace GTATrainer
             IntPtr player = GetPlayerPointer();
             if (player == IntPtr.Zero) return (0, 0, 0);
 
-            float x = _driver.Read<float>(_process.Id, IntPtr.Add(player, OFFSET_POS_X));
-            float y = _driver.Read<float>(_process.Id, IntPtr.Add(player, OFFSET_POS_Y));
-            float z = _driver.Read<float>(_process.Id, IntPtr.Add(player, OFFSET_POS_Z));
+            float x = _driver.Read<float>(_process.Id, IntPtr.Add(player, GTA5Offsets.VisualXOffset));
+            float y = _driver.Read<float>(_process.Id, IntPtr.Add(player, GTA5Offsets.VisualYOffset));
+            float z = _driver.Read<float>(_process.Id, IntPtr.Add(player, GTA5Offsets.VisualZOffset));
 
             return (x, y, z);
         }
@@ -227,12 +213,11 @@ namespace GTATrainer
             IntPtr player = GetPlayerPointer();
             if (player == IntPtr.Zero) return;
 
-            _driver.Write(_process.Id, IntPtr.Add(player, OFFSET_POS_X), x);
-            _driver.Write(_process.Id, IntPtr.Add(player, OFFSET_POS_Y), y);
-            _driver.Write(_process.Id, IntPtr.Add(player, OFFSET_POS_Z), z);
+            _driver.Write(_process.Id, IntPtr.Add(player, GTA5Offsets.VisualXOffset), x);
+            _driver.Write(_process.Id, IntPtr.Add(player, GTA5Offsets.VisualYOffset), y);
+            _driver.Write(_process.Id, IntPtr.Add(player, GTA5Offsets.VisualZOffset), z);
         }
 
-        // Godmode (congela vida em valor alto)
         public void EnableGodMode(bool enable)
         {
             if (enable)
